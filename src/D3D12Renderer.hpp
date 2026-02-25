@@ -1,4 +1,5 @@
 #include <chrono>
+#include <cstdint>
 #include <functional>
 #include <memory>
 
@@ -23,7 +24,11 @@ public:
         COUNT,
     };
 
-    enum class SRV : int { D2D };
+    enum class OutputMode : uint32_t {
+        SDR = 0,
+        HDR10_PQ = 1,
+        SCRGB = 2,
+    };
 
     D3D12Renderer(IDXGISwapChain* swapchain_, ID3D12Device* device_, ID3D12CommandQueue* cmd_queue_);
     virtual ~D3D12Renderer() {
@@ -39,9 +44,19 @@ public:
     void render(std::function<void(D2DPainter&)> draw_fn, bool update_d2d);
 
     auto& get_d2d() { return m_d2d; }
+    bool is_hdr_output() const { return m_output_mode != OutputMode::SDR; }
+    uint32_t get_output_mode() const { return static_cast<uint32_t>(m_output_mode); }
+    float get_paper_white_nits() const { return m_paper_white_nits; }
+    void set_paper_white_nits(float nits);
 
 private:
     template <typename T> using ComPtr = Microsoft::WRL::ComPtr<T>;
+    // Per-frame SRV layout:
+    //   slot 0 -> D2D overlay texture (t0)
+    //   slot 1 -> copied scene backbuffer (t1)
+    static constexpr uint32_t SRV_D2D_SLOT = 0;
+    static constexpr uint32_t SRV_SCENE_SLOT = 1;
+    static constexpr uint32_t SRV_SLOTS_PER_FRAME = 2;
 
     struct Vert {
         float x, y;
@@ -67,6 +82,7 @@ private:
 
     struct RenderResources {
         ComPtr<ID3D12Resource> vert_buffer{};
+        ComPtr<ID3D12Resource> scene_copy{};
     };
 
     uint32_t m_frames_in_flight{1};
@@ -75,8 +91,12 @@ private:
 
     int m_width{};
     int m_height{};
+    OutputMode m_output_mode{OutputMode::SDR};
+    float m_paper_white_nits{200.0f};
 
     std::unique_ptr<D2DPainter> m_d2d{};
+    void refresh_output_mode();
+    uint32_t get_srv_index(uint32_t frame_index, uint32_t slot) const { return frame_index * SRV_SLOTS_PER_FRAME + slot; }
 
     auto& get_rt(RTV rtv) { return m_rts[(int)rtv]; }
 
@@ -85,13 +105,13 @@ private:
                 (int)rtv * m_device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV)};
     }
 
-    D3D12_CPU_DESCRIPTOR_HANDLE get_cpu_srv(SRV srv) {
+    D3D12_CPU_DESCRIPTOR_HANDLE get_cpu_srv(uint32_t index) {
         return {m_srv_heap->GetCPUDescriptorHandleForHeapStart().ptr +
-                (int)srv * m_device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV)};
+                index * m_device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV)};
     }
 
-    D3D12_GPU_DESCRIPTOR_HANDLE get_gpu_srv(SRV srv) {
+    D3D12_GPU_DESCRIPTOR_HANDLE get_gpu_srv(uint32_t index) {
         return {m_srv_heap->GetGPUDescriptorHandleForHeapStart().ptr +
-                (int)srv * m_device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV)};
+                index * m_device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV)};
     }
 };

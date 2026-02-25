@@ -27,7 +27,20 @@ D2DPainter::D2DPainter(ID3D11Device* device, IDXGISurface* surface) {
         throw std::runtime_error{"Failed to get DXGI surface description"};
     }
 
-    if (FAILED(m_context->CreateBitmapFromDxgiSurface(surface, nullptr, &m_rt))) {
+    D2D1_BITMAP_PROPERTIES1 rt_props = D2D1::BitmapProperties1(
+        D2D1_BITMAP_OPTIONS_TARGET,
+        D2D1::PixelFormat(m_rt_desc.Format, D2D1_ALPHA_MODE_PREMULTIPLIED),
+        96.0f,
+        96.0f);
+
+    auto hr = m_context->CreateBitmapFromDxgiSurface(surface, &rt_props, &m_rt);
+    if (FAILED(hr)) {
+        // Some runtime/driver combos reject explicit properties for wrapped DXGI surfaces.
+        // Fallback to default properties to preserve compatibility.
+        hr = m_context->CreateBitmapFromDxgiSurface(surface, nullptr, &m_rt);
+    }
+
+    if (FAILED(hr)) {
         throw std::runtime_error{"Failed to create D2D render target from dxgi surface"};
     }
 

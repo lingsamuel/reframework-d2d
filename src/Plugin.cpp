@@ -137,6 +137,34 @@ void on_ref_lua_state_created(lua_State* l) try {
 
     detail["get_max_updaterate"] = []() { return get_d2d_max_updaterate(); };
     detail["set_max_updaterate"] = [](double fps) { set_d2d_max_updaterate(fps); };
+    detail["is_hdr"] = []() {
+        if (g_plugin->d3d12 == nullptr) {
+            return false;
+        }
+
+        return g_plugin->d3d12->is_hdr_output();
+    };
+    detail["get_output_mode"] = []() {
+        if (g_plugin->d3d12 == nullptr) {
+            return 0;
+        }
+
+        return (int)g_plugin->d3d12->get_output_mode();
+    };
+    detail["get_paper_white_nits"] = []() {
+        if (g_plugin->d3d12 == nullptr) {
+            return 200.0f;
+        }
+
+        return g_plugin->d3d12->get_paper_white_nits();
+    };
+    detail["set_paper_white_nits"] = [](double nits) {
+        if (g_plugin->d3d12 == nullptr) {
+            return;
+        }
+
+        g_plugin->d3d12->set_paper_white_nits((float)nits);
+    };
     detail["get_last_error"] = []() {
         return g_plugin->last_script_error;
     };
