@@ -26,31 +26,33 @@ re.on_draw_ui(
             cfg.max_update_rate = value 
         end
 
-        local output_mode = d2d.detail.get_output_mode()
-        local output_mode_name = "Unknown"
-        if output_mode == 0 then
-            output_mode_name = "SDR"
-        elseif output_mode == 1 then
-            output_mode_name = "HDR10 PQ"
-        elseif output_mode == 2 then
-            output_mode_name = "scRGB"
-        end
+        if d2d.detail.get_output_mode and d2d.detail.is_hdr then
+            local output_mode = d2d.detail.get_output_mode()
+            local output_mode_name = "Unknown"
+            if output_mode == 0 then
+                output_mode_name = "SDR"
+            elseif output_mode == 1 then
+                output_mode_name = "HDR10 PQ"
+            elseif output_mode == 2 then
+                output_mode_name = "scRGB"
+            end
 
-        local is_hdr = d2d.detail.is_hdr()
-        imgui.text(is_hdr and "HDR Output: On" or "HDR Output: Off")
-        if is_hdr then
-            imgui.text("Output Mode: " .. output_mode_name)
-        end
-
-        if is_hdr then
-            local changed_pw, pw = imgui.slider_float("Paper White (nits)", cfg.paper_white_nits, 80.0, 1000.0)
-            if changed_pw then
-                cfg.paper_white_nits = pw
+            local is_hdr = d2d.detail.is_hdr()
+            imgui.text(is_hdr and "HDR Output: On" or "HDR Output: Off")
+            if is_hdr then
+                imgui.text("Output Mode: " .. output_mode_name)
+            end
+            
+            if is_hdr then
+                local changed_pw, pw = imgui.slider_float("Paper White (nits)", cfg.paper_white_nits, 80.0, 1000.0)
+                if changed_pw then
+                    cfg.paper_white_nits = pw
+                end
             end
         end
 
-        local last_error = d2d.detail.get_last_error()
-        if last_error ~= "" then
+        if d2d.detail.get_last_error then
+            local last_error = d2d.detail.get_last_error()
             imgui.text("Last Script Error:")
             imgui.text_colored(last_error, 0xFF0000FF)
         end
@@ -65,7 +67,8 @@ d2d.register(
     end,
     function()
         d2d.detail.set_max_updaterate(cfg.max_update_rate)
-        if d2d.detail.is_hdr() then
+
+        if d2d.detail.is_hdr and d2d.detail.is_hdr() then
             d2d.detail.set_paper_white_nits(cfg.paper_white_nits)
         end
     end
