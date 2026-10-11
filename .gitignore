@@ -5,3 +5,7 @@ install/
 out/
 CMakeSettings.json
 cmake-build-*/
+
+.worktrees
+docs/
+AGENTS.md
