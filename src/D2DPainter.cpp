@@ -3,6 +3,7 @@
 #include "utf8.h"
 
 #include "D2DPainter.hpp"
+#include "ColorSpace.hpp"
 
 D2DPainter::D2DPainter(ID3D11Device* device, IDXGISurface* surface) {
     if (FAILED(D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, m_d2d1.GetAddressOf()))) {
@@ -28,7 +29,7 @@ D2DPainter::D2DPainter(ID3D11Device* device, IDXGISurface* surface) {
     }
 
     D2D1_BITMAP_PROPERTIES1 rt_props = D2D1::BitmapProperties1(
-        D2D1_BITMAP_OPTIONS_TARGET,
+        D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
         D2D1::PixelFormat(m_rt_desc.Format, D2D1_ALPHA_MODE_PREMULTIPLIED),
         96.0f,
         96.0f);
@@ -67,11 +68,23 @@ void D2DPainter::end() {
     m_context->EndDraw();
 }
 
+bool D2DPainter::set_linear_blending(bool enabled) {
+    const bool changed = m_linear_blending != enabled;
+    m_linear_blending = enabled;
+    return changed;
+}
+
 void D2DPainter::set_color(unsigned int color) {
     float r = ((color & 0xFF'0000) >> 16) / 255.0f;
     float g = ((color & 0xFF00) >> 8) / 255.0f;
     float b = ((color & 0xFF) >> 0) / 255.0f;
     float a = ((color & 0xFF00'0000) >> 24) / 255.0f;
+    // Decode HDR inputs before blending primitives; decoding the final overlay cannot recover correct luminance.
+    if (m_linear_blending) {
+        r = ColorSpace::srgb_to_linear(r);
+        g = ColorSpace::srgb_to_linear(g);
+        b = ColorSpace::srgb_to_linear(b);
+    }
     m_brush->SetColor({r, g, b, a});
 }
 
@@ -145,11 +158,11 @@ void D2DPainter::line(float x1, float y1, float x2, float y2, float thickness, u
 
 void D2DPainter::image(std::shared_ptr<D2DImage>& image, float x, float y, float alpha) {
     auto [w, h] = image->size();
-    m_context->DrawBitmap(image->bitmap().Get(), {x, y, x + w, y + h}, alpha);
+    m_context->DrawBitmap(image->bitmap(m_linear_blending), {x, y, x + w, y + h}, alpha);
 }
 
 void D2DPainter::image(std::shared_ptr<D2DImage>& image, float x, float y, float w, float h, float alpha) {
-    m_context->DrawBitmap(image->bitmap().Get(), {x, y, x + w, y + h}, alpha);
+    m_context->DrawBitmap(image->bitmap(m_linear_blending), {x, y, x + w, y + h}, alpha);
 }
 
 void D2DPainter::fill_circle(float centerX, float centerY, float radius, unsigned int color) {

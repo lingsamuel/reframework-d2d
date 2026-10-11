@@ -12,6 +12,7 @@
 #include "D3D12CommandContext.hpp"
 
 #include "D2DPainter.hpp"
+#include "HDRDisplayInfo.hpp"
 
 class D3D12Renderer {
 public:
@@ -44,7 +45,9 @@ public:
     void render(std::function<void(D2DPainter&)> draw_fn, bool update_d2d);
 
     auto& get_d2d() { return m_d2d; }
-    bool is_hdr_output() const { return m_output_mode != OutputMode::SDR; }
+    bool is_hdr_output() const {
+        return m_output_mode == OutputMode::HDR10_PQ || (m_output_mode == OutputMode::SCRGB && m_hdr_display);
+    }
     uint32_t get_output_mode() const { return static_cast<uint32_t>(m_output_mode); }
     float get_paper_white_nits() const { return m_paper_white_nits; }
     void set_paper_white_nits(float nits);
@@ -93,6 +96,9 @@ private:
     int m_height{};
     OutputMode m_output_mode{OutputMode::SDR};
     float m_paper_white_nits{200.0f};
+    HWND m_output_window{};
+    HDRDisplayInfo m_display_info{};
+    bool m_hdr_display{};
 
     std::unique_ptr<D2DPainter> m_d2d{};
     void refresh_output_mode();

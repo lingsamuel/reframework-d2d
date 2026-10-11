@@ -8,6 +8,7 @@
 #include "D3D12Shaders.hpp"
 
 #include "D3D12Renderer.hpp"
+#include "ColorSpace.hpp"
 
 D3D12Renderer::D3D12Renderer(IDXGISwapChain* swapchain_, ID3D12Device* device_, ID3D12CommandQueue* cmd_queue_)
     : m_swapchain{(IDXGISwapChain3*)swapchain_}
@@ -38,6 +39,7 @@ D3D12Renderer::D3D12Renderer(IDXGISwapChain* swapchain_, ID3D12Device* device_, 
     if (FAILED(m_swapchain->GetDesc(&swapchain_desc))) {
         throw std::runtime_error{"Failed to get swapchain description"};
     }
+    m_output_window = swapchain_desc.OutputWindow;
 
     // Reserve two SRVs per buffered frame: overlay(t0) + scene copy(t1).
     D3D12_DESCRIPTOR_HEAP_DESC srv_desc = {};
@@ -83,7 +85,7 @@ D3D12Renderer::D3D12Renderer(IDXGISwapChain* swapchain_, ID3D12Device* device_, 
     d2d_desc.Height = backbuffer_desc.Height;
     d2d_desc.DepthOrArraySize = 1;
     d2d_desc.MipLevels = 1;
-    d2d_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    d2d_desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
     d2d_desc.SampleDesc.Count = 1;
     d2d_desc.SampleDesc.Quality = 0;
     d2d_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
@@ -263,7 +265,7 @@ D3D12Renderer::D3D12Renderer(IDXGISwapChain* swapchain_, ID3D12Device* device_, 
     scene_desc.Flags = D3D12_RESOURCE_FLAG_NONE;
 
     D3D12_SHADER_RESOURCE_VIEW_DESC d2d_srv_desc{};
-    d2d_srv_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    d2d_srv_desc.Format = d2d_desc.Format;
     d2d_srv_desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
     d2d_srv_desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
     d2d_srv_desc.Texture2D.MipLevels = 1;
@@ -338,6 +340,7 @@ D3D12Renderer::D3D12Renderer(IDXGISwapChain* swapchain_, ID3D12Device* device_, 
 
 void D3D12Renderer::render(std::function<void(D2DPainter&)> draw_fn, bool update_d2d) {
     refresh_output_mode();
+    const bool encoding_changed = m_d2d->set_linear_blending(m_output_mode != OutputMode::SDR);
     auto frame_index = m_swapchain->GetCurrentBackBufferIndex() % m_cmd_contexts.size();
     auto& cmd_context = m_cmd_contexts[frame_index];
     auto& resources = m_render_resources[frame_index];
@@ -345,7 +348,7 @@ void D3D12Renderer::render(std::function<void(D2DPainter&)> draw_fn, bool update
     auto& vert_buffer = resources->vert_buffer;
     auto& scene_copy = resources->scene_copy;
 
-    if (update_d2d) {
+    if (update_d2d || encoding_changed) {
         m_d3d11on12_device->AcquireWrappedResources(m_wrapped_rt.GetAddressOf(), 1);
         m_d2d->begin();
         draw_fn(*m_d2d);
@@ -389,7 +392,8 @@ void D3D12Renderer::render(std::function<void(D2DPainter&)> draw_fn, bool update
     cmd_list->SetPipelineState(m_pipeline_state.Get());
     cmd_list->SetGraphicsRootSignature(m_root_signature.Get());
     cmd_list->SetGraphicsRoot32BitConstants(0, 16, mvp, 0);
-    float pix_consts[4] = {static_cast<float>(static_cast<uint32_t>(m_output_mode)), m_paper_white_nits, 0.0f, 0.0f};
+    float pix_consts[4] = {static_cast<float>(static_cast<uint32_t>(m_output_mode)), m_paper_white_nits,
+        ColorSpace::scrgb_white_scale(m_paper_white_nits, m_hdr_display), 0.0f};
     cmd_list->SetGraphicsRoot32BitConstants(1, 4, pix_consts, 0);
 
     // Copy the scene backbuffer, then run color-managed composition in shader.
@@ -451,6 +455,9 @@ void D3D12Renderer::refresh_output_mode() {
     auto bb_index = m_swapchain->GetCurrentBackBufferIndex();
     const auto format = m_rts[bb_index]->GetDesc().Format;
 
+    m_hdr_display = (format == DXGI_FORMAT_R16G16B16A16_FLOAT || format == DXGI_FORMAT_R10G10B10A2_UNORM) &&
+        m_display_info.is_hdr(m_output_window);
+
     if (format == DXGI_FORMAT_R16G16B16A16_FLOAT) {
         m_output_mode = OutputMode::SCRGB;
         return;
@@ -459,25 +466,6 @@ void D3D12Renderer::refresh_output_mode() {
     if (format != DXGI_FORMAT_R10G10B10A2_UNORM) {
         m_output_mode = OutputMode::SDR;
         return;
-    }
-
-    bool output_is_hdr = false;
-    ComPtr<IDXGIOutput> output{};
-    if (SUCCEEDED(m_swapchain->GetContainingOutput(&output)) && output != nullptr) {
-        ComPtr<IDXGIOutput6> output6{};
-        if (SUCCEEDED(output.As(&output6)) && output6 != nullptr) {
-            DXGI_OUTPUT_DESC1 output_desc{};
-            if (SUCCEEDED(output6->GetDesc1(&output_desc))) {
-                switch (output_desc.ColorSpace) {
-                case DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020:
-                case DXGI_COLOR_SPACE_RGB_STUDIO_G2084_NONE_P2020:
-                    output_is_hdr = true;
-                    break;
-                default:
-                    break;
-                }
-            }
-        }
     }
 
     // require HDR output and PQ present support before choosing HDR10.
@@ -492,5 +480,5 @@ void D3D12Renderer::refresh_output_mode() {
         can_present_pq = (pq_support & DXGI_SWAP_CHAIN_COLOR_SPACE_SUPPORT_FLAG_PRESENT) != 0;
     }
 
-    m_output_mode = (output_is_hdr && can_present_pq) ? OutputMode::HDR10_PQ : OutputMode::SDR;
+    m_output_mode = (m_hdr_display && can_present_pq) ? OutputMode::HDR10_PQ : OutputMode::SDR;
 }

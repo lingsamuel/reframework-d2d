@@ -31,16 +31,19 @@ add_library(reframework-d2d SHARED
     src/DrawList.cpp
     src/Plugin.cpp
     src/D3D12CommandContext.cpp
+    src/HDRDisplayInfo.cpp
 )
 target_include_directories(reframework-d2d PRIVATE 
     src
     deps/reframework/include
 )
 target_compile_features(reframework-d2d PRIVATE cxx_std_20)
-target_link_libraries(reframework-d2d PRIVATE utf8cpp sol2::sol2 lua d2d1 dwrite d3d11 d3d12 dxgi d3dcompiler)
+target_link_libraries(reframework-d2d PRIVATE utf8cpp sol2::sol2 lua d2d1 dwrite d3d11 d3d12 dxgi d3dcompiler dxguid)
 
 install(
     TARGETS reframework-d2d
     DESTINATION bin
     COMPONENT reframework-d2d
 )
+
+include(cmake/Tests.cmake)

@@ -22,6 +22,8 @@ public:
     void begin();
     void end();
 
+    bool set_linear_blending(bool enabled);
+
     void set_color(unsigned int color);
 
     void text(std::shared_ptr<D2DFont>& font, const std::string& text, float x, float y, unsigned int color);
@@ -58,6 +60,7 @@ private:
     DXGI_SURFACE_DESC m_rt_desc{};
     ComPtr<ID2D1Bitmap1> m_rt{};
     ComPtr<ID2D1SolidColorBrush> m_brush{};
+    bool m_linear_blending{};
 
     ComPtr<IDWriteFactory5> m_dwrite{};
     ComPtr<IWICImagingFactory> m_wic{};

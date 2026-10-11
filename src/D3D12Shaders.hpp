@@ -1,6 +1,6 @@
 #pragma once
 
-const char* D3D12_VERT_SHADER = R"(
+inline constexpr const char* D3D12_VERT_SHADER = R"(
 cbuffer vert_buffer : register(b0) {
     float4x4 mvp;
 };
@@ -26,7 +26,7 @@ PS_INPUT main(VS_INPUT input) {
 }
 )";
 
-const char* D3D12_PIX_SHADER = R"(
+inline constexpr const char* D3D12_PIX_SHADER = R"(
 struct PS_INPUT {
     float4 pos : SV_POSITION;
     float4 color : COLOR;
@@ -36,25 +36,13 @@ struct PS_INPUT {
 cbuffer pix_buffer : register(b1) {
     float output_mode;
     float paper_white_nits;
-    float2 _pad;
+    float sc_rgb_scale;
+    float _pad;
 };
 
 SamplerState sampler0 : register(s0);
 Texture2D overlay_tex : register(t0);
 Texture2D scene_tex : register(t1);
-
-float3 srgb_to_linear(float3 v) {
-    float3 lo = v / 12.92f;
-    float3 hi = pow((v + 0.055f) / 1.055f, 2.4f);
-    return lerp(lo, hi, step(0.04045f, v));
-}
-
-float3 linear_to_srgb(float3 v) {
-    v = max(v, 0.0f);
-    float3 lo = v * 12.92f;
-    float3 hi = 1.055f * pow(v, 1.0f / 2.4f) - 0.055f;
-    return lerp(lo, hi, step(0.0031308f, v));
-}
 
 float3 rec709_to_rec2020(float3 c) {
     return float3(
@@ -94,20 +82,19 @@ float3 pq_to_linear_nits(float3 pq) {
 
 float4 main(PS_INPUT input) : SV_TARGET {
     float4 overlay = input.color * overlay_tex.Sample(sampler0, input.uv);
-    float4 scene = scene_tex.Sample(sampler0, input.uv);
+    float4 scene = scene_tex.Load(int3(int2(input.pos.xy), 0));
     float alpha = saturate(overlay.a);
+    // Preserve scene pixels in transparent areas to avoid resampling and PQ round-trip errors.
+    if (alpha == 0.0f) {
+        return scene;
+    }
     float out_alpha = alpha + scene.a * (1.0f - alpha);
 
-    // D2D target is premultiplied alpha. Convert to straight color before gamma decode.
-    float3 overlay_straight = alpha > 1e-5f ? (overlay.rgb / alpha) : float3(0.0f, 0.0f, 0.0f);
-    float3 overlay_linear = srgb_to_linear(saturate(overlay_straight)) * alpha;
-
-    // 0 = SDR
+    // Preserve legacy premultiplied blending for SDR; HDR overlays are already premultiplied in linear space.
     if (output_mode < 0.5f) {
-        float3 scene_linear = srgb_to_linear(saturate(scene.rgb));
-        float3 out_linear = overlay_linear + scene_linear * (1.0f - alpha);
-        return float4(linear_to_srgb(out_linear), out_alpha);
+        return float4(overlay.rgb + scene.rgb * (1.0f - alpha), out_alpha);
     }
+    float3 overlay_linear = overlay.rgb;
 
     // 1 = HDR10 (PQ, Rec.2020)
     if (output_mode < 1.5f) {
@@ -118,7 +105,6 @@ float4 main(PS_INPUT input) : SV_TARGET {
     }
 
     // 2 = scRGB (linear FP16; 1.0 ~= 80 nits)
-    float sc_rgb_scale = paper_white_nits / 80.0f;
     float3 overlay_scrgb = overlay_linear * sc_rgb_scale;
     float3 out_scrgb = overlay_scrgb + scene.rgb * (1.0f - alpha);
     return float4(out_scrgb, out_alpha);
