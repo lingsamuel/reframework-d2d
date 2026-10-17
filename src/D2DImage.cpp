@@ -27,11 +27,34 @@ D2DImage::D2DImage(ComPtr<IWICImagingFactory> wic, ComPtr<ID2D1DeviceContext> co
         throw std::runtime_error{"Failed to initialize WIC format converter"};
     }
 
-    if (FAILED(context->CreateBitmapFromWicBitmap(converter.Get(), nullptr, &m_bitmap))) {
-        throw std::runtime_error{"Failed to create D2D bitmap from WIC bitmap"};
+    // Keep decoded pixels independent of the D2D device, and release the input file.
+    if (FAILED(wic->CreateBitmapFromSource(converter.Get(), WICBitmapCacheOnLoad, &m_pixels)) ||
+        FAILED(m_pixels->GetSize(&m_size.width, &m_size.height))) {
+        throw std::runtime_error{"Failed to retain decoded image pixels"};
     }
+    ComPtr<ID2D1Device> device;
+    context->GetDevice(&device);
+    create_bitmaps(device.Get());
+}
 
-    m_size = m_bitmap->GetPixelSize();
+D2DImage::ComPtr<ID2D1Bitmap> D2DImage::bitmap(ID2D1DeviceContext* context, bool linear) {
+    std::scoped_lock lock{m_mutex};
+    ComPtr<ID2D1Device> device;
+    context->GetDevice(&device);
+    if (device.Get() != m_device.Get()) create_bitmaps(device.Get());
+    return linear ? m_linear_bitmap : m_bitmap;
+}
+
+void D2DImage::create_bitmaps(ID2D1Device* device) {
+    // A separate context prevents image loading from nesting BeginDraw or changing
+    // the render target of an active overlay batch on the caller's context.
+    ComPtr<ID2D1DeviceContext> context;
+    ComPtr<ID2D1Bitmap> bitmap;
+    ComPtr<ID2D1Bitmap1> linear_bitmap;
+    if (FAILED(device->CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE, &context)) ||
+        FAILED(context->CreateBitmapFromWicBitmap(m_pixels.Get(), nullptr, &bitmap))) {
+        throw std::runtime_error{"Failed to create image context or bitmap"};
+    }
 
     ComPtr<ID2D1ColorContext> srgb, linear;
     if (FAILED(context->CreateColorContext(D2D1_COLOR_SPACE_SRGB, nullptr, 0, &srgb)) ||
@@ -46,25 +69,21 @@ D2DImage::D2DImage(ComPtr<IWICImagingFactory> wic, ComPtr<ID2D1DeviceContext> co
         FAILED(conversion->SetValue(D2D1_PROPERTY_PRECISION, D2D1_BUFFER_PRECISION_16BPC_FLOAT))) {
         throw std::runtime_error{"Failed to configure linear image conversion"};
     }
-    conversion->SetInput(0, m_bitmap.Get());
+    conversion->SetInput(0, bitmap.Get());
 
     auto props = D2D1::BitmapProperties1(D2D1_BITMAP_OPTIONS_TARGET,
         D2D1::PixelFormat(DXGI_FORMAT_R16G16B16A16_FLOAT, D2D1_ALPHA_MODE_PREMULTIPLIED),
         96.0f, 96.0f, linear.Get());
-    if (FAILED(context->CreateBitmap(m_size, nullptr, 0, &props, &m_linear_bitmap))) {
+    if (FAILED(context->CreateBitmap(m_size, nullptr, 0, &props, &linear_bitmap))) {
         throw std::runtime_error{"Failed to create linear image bitmap"};
     }
 
-    // Convert once at load time; keep using DrawBitmap for scaling and opacity during rendering.
-    ComPtr<ID2D1Image> previous_target;
-    context->GetTarget(&previous_target);
-    context->SetTarget(m_linear_bitmap.Get());
+    context->SetTarget(linear_bitmap.Get());
     context->BeginDraw();
     context->Clear(D2D1::ColorF(0, 0, 0, 0));
     context->DrawImage(conversion.Get());
-    auto hr = context->EndDraw();
-    context->SetTarget(previous_target.Get());
-    if (FAILED(hr)) {
-        throw std::runtime_error{"Failed to convert image to linear color"};
-    }
+    if (FAILED(context->EndDraw())) throw std::runtime_error{"Failed to convert image to linear color"};
+    m_bitmap = std::move(bitmap);
+    m_linear_bitmap = std::move(linear_bitmap);
+    m_device = device;
 }

@@ -11,10 +11,14 @@
 #include "ColorSpace.hpp"
 
 D3D12Renderer::D3D12Renderer(IDXGISwapChain* swapchain_, ID3D12Device* device_, ID3D12CommandQueue* cmd_queue_)
-    : m_swapchain{(IDXGISwapChain3*)swapchain_}
-    , m_device{device_}
+    : m_device{device_}
     , m_cmd_queue{cmd_queue_} {
 
+    ComPtr<IDXGISwapChain3> swapchain;
+    if (!swapchain_ || !device_ || !cmd_queue_ || FAILED(swapchain_->QueryInterface(IID_PPV_ARGS(&swapchain))))
+        throw std::runtime_error{"Invalid D3D12 renderer data"};
+    m_swapchain_identity = reinterpret_cast<uintptr_t>(swapchain.Get());
+    m_tail = std::make_unique<D3D12CommandContext>(m_device.Get());
     if (FAILED(D3D11On12CreateDevice(m_device.Get(), D3D11_CREATE_DEVICE_BGRA_SUPPORT, nullptr, 0, (IUnknown**)m_cmd_queue.GetAddressOf(),
             1, 0, &m_d3d11_device, &m_d3d11_context, nullptr))) {
         throw std::runtime_error{"Failed to create D3D11On12 device"};
@@ -26,7 +30,7 @@ D3D12Renderer::D3D12Renderer(IDXGISwapChain* swapchain_, ID3D12Device* device_, 
 
     // Create RTV descriptor heap
     D3D12_DESCRIPTOR_HEAP_DESC rtv_desc = {};
-    rtv_desc.NumDescriptors = (int)RTV::COUNT;
+    rtv_desc.NumDescriptors = 1;
     rtv_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
     rtv_desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
 
@@ -36,7 +40,7 @@ D3D12Renderer::D3D12Renderer(IDXGISwapChain* swapchain_, ID3D12Device* device_, 
 
     DXGI_SWAP_CHAIN_DESC swapchain_desc{};
 
-    if (FAILED(m_swapchain->GetDesc(&swapchain_desc))) {
+    if (FAILED(swapchain->GetDesc(&swapchain_desc))) {
         throw std::runtime_error{"Failed to get swapchain description"};
     }
     m_output_window = swapchain_desc.OutputWindow;
@@ -62,18 +66,17 @@ D3D12Renderer::D3D12Renderer(IDXGISwapChain* swapchain_, ID3D12Device* device_, 
         } else {
             throw std::runtime_error{"Failed to create command context"};
         }
-
-        if (SUCCEEDED(m_swapchain->GetBuffer((UINT)i, IID_PPV_ARGS(&m_rts[i])))) {
-            m_device->CreateRenderTargetView(m_rts[i].Get(), nullptr, get_cpu_rtv((RTV)i));
-        }
     }
 
     m_frames_in_flight = m_cmd_contexts.size();
 
     // Create D2D render target
-    auto& backbuffer = get_rt(RTV::BACKBUFFER_0);
+    ComPtr<ID3D12Resource> backbuffer;
+    if (FAILED(swapchain->GetBuffer(0, IID_PPV_ARGS(&backbuffer))))
+        throw std::runtime_error{"Failed to get initial backbuffer"};
     auto backbuffer_desc = backbuffer->GetDesc();
-    refresh_output_mode();
+    m_backbuffer_format = backbuffer_desc.Format;
+    refresh_output_mode(swapchain.Get());
 
     m_width = backbuffer_desc.Width;
     m_height = backbuffer_desc.Height;
@@ -99,14 +102,12 @@ D3D12Renderer::D3D12Renderer(IDXGISwapChain* swapchain_, ID3D12Device* device_, 
     clear_value.Format = d2d_desc.Format;
 
     if (FAILED(m_device->CreateCommittedResource(&d2d_heap_props, D3D12_HEAP_FLAG_NONE, &d2d_desc,
-            D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, &clear_value, IID_PPV_ARGS(&m_rts[(int)RTV::D2D])))) {
+            D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, &clear_value, IID_PPV_ARGS(&m_overlay)))) {
         throw std::runtime_error{"Failed to create D2D render target"};
     }
 
-    m_device->CreateRenderTargetView(m_rts[(int)RTV::D2D].Get(), nullptr, get_cpu_rtv(RTV::D2D));
-
     D3D11_RESOURCE_FLAGS res_flags{D3D11_BIND_RENDER_TARGET};
-    if (FAILED(m_d3d11on12_device->CreateWrappedResource(get_rt(RTV::D2D).Get(), &res_flags, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+    if (FAILED(m_d3d11on12_device->CreateWrappedResource(m_overlay.Get(), &res_flags, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
             D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, IID_PPV_ARGS(&m_wrapped_rt)))) {
         throw std::runtime_error{"Failed to create wrapped render target"};
     }
@@ -331,31 +332,67 @@ D3D12Renderer::D3D12Renderer(IDXGISwapChain* swapchain_, ID3D12Device* device_, 
 
         // Write this frame's two SRV descriptors contiguously in the global heap.
         m_device->CreateShaderResourceView(
-            m_rts[(int)RTV::D2D].Get(), &d2d_srv_desc, get_cpu_srv(get_srv_index(i, SRV_D2D_SLOT)));
+            m_overlay.Get(), &d2d_srv_desc, get_cpu_srv(get_srv_index(i, SRV_D2D_SLOT)));
         m_device->CreateShaderResourceView(
             resources->scene_copy.Get(), &scene_srv_desc, get_cpu_srv(get_srv_index(i, SRV_SCENE_SLOT)));
         m_render_resources.push_back(std::move(resources));
     }
 }
 
-void D3D12Renderer::render(std::function<void(D2DPainter&)> draw_fn, bool update_d2d) {
-    refresh_output_mode();
-    const bool encoding_changed = m_d2d->set_linear_blending(m_output_mode != OutputMode::SDR);
-    auto frame_index = m_swapchain->GetCurrentBackBufferIndex() % m_cmd_contexts.size();
+bool D3D12Renderer::render(IDXGISwapChain* swapchain_, std::function<void(D2DPainter&)> draw_fn, bool update_d2d) {
+    auto renderer_lock = try_lock();
+    // A retired renderer may outlive a host swapchain replacement. Keep its HWND
+    // association alive only within the current serialized Present callback.
+    ComPtr<IDXGISwapChain3> swapchain;
+    if (!swapchain_ || FAILED(swapchain_->QueryInterface(IID_PPV_ARGS(&swapchain))))
+        throw std::runtime_error{"Invalid current swapchain"};
+    const auto bb_index = swapchain->GetCurrentBackBufferIndex();
+    ComPtr<ID3D12Resource> backbuffer;
+    if (FAILED(swapchain->GetBuffer(bb_index, IID_PPV_ARGS(&backbuffer))))
+        throw std::runtime_error{"Failed to get current backbuffer"};
+    auto backbuffer_desc = backbuffer->GetDesc();
+    if (backbuffer_desc.Width != m_width || backbuffer_desc.Height != m_height || backbuffer_desc.Format != m_backbuffer_format)
+        throw std::runtime_error{"Backbuffer changed; renderer must be recreated"};
+    m_tail_signalled = false;
+    auto frame_index = bb_index % m_cmd_contexts.size();
     auto& cmd_context = m_cmd_contexts[frame_index];
     auto& resources = m_render_resources[frame_index];
     auto& cmd_list = cmd_context->begin();
+    struct CancelRecording {
+        D3D12CommandContext& context;
+        ~CancelRecording() { context.cancel(); }
+    } cancel_recording{*cmd_context};
+    bool repainted = false;
+    if (renderer_lock.owns_lock()) {
+        // A GPU timeout must not consume a pending overlay encoding change.
+        refresh_output_mode(swapchain.Get());
+        m_composite_paper_white_nits = m_paper_white_nits;
+        const bool encoding_changed = m_d2d->set_linear_blending(m_output_mode != OutputMode::SDR);
+        if (update_d2d || encoding_changed || !m_overlay_valid) {
+            m_d3d11on12_device->AcquireWrappedResources(m_wrapped_rt.GetAddressOf(), 1);
+            try {
+                m_d2d->begin();
+                try { draw_fn(*m_d2d); }
+                catch (...) {
+                    try { m_d2d->end(); } catch (...) {}
+                    throw;
+                }
+                m_d2d->end();
+            } catch (...) {
+                m_d3d11on12_device->ReleaseWrappedResources(m_wrapped_rt.GetAddressOf(), 1);
+                m_d3d11_context->Flush();
+                throw;
+            }
+            m_d3d11on12_device->ReleaseWrappedResources(m_wrapped_rt.GetAddressOf(), 1);
+            m_d3d11_context->Flush();
+            repainted = m_overlay_valid = true;
+        }
+    }
+    // Composition touches only Present-owned D3D12 state and the completed overlay.
+    // Do it even while Lua owns the D2D lock; never sample a never-painted texture.
+    if (!m_overlay_valid) return false;
     auto& vert_buffer = resources->vert_buffer;
     auto& scene_copy = resources->scene_copy;
-
-    if (update_d2d || encoding_changed) {
-        m_d3d11on12_device->AcquireWrappedResources(m_wrapped_rt.GetAddressOf(), 1);
-        m_d2d->begin();
-        draw_fn(*m_d2d);
-        m_d2d->end();
-        m_d3d11on12_device->ReleaseWrappedResources(m_wrapped_rt.GetAddressOf(), 1);
-        m_d3d11_context->Flush();
-    }
 
     auto L = 0.0f;
     auto R = (float)m_width;
@@ -392,16 +429,15 @@ void D3D12Renderer::render(std::function<void(D2DPainter&)> draw_fn, bool update
     cmd_list->SetPipelineState(m_pipeline_state.Get());
     cmd_list->SetGraphicsRootSignature(m_root_signature.Get());
     cmd_list->SetGraphicsRoot32BitConstants(0, 16, mvp, 0);
-    float pix_consts[4] = {static_cast<float>(static_cast<uint32_t>(m_output_mode)), m_paper_white_nits,
-        ColorSpace::scrgb_white_scale(m_paper_white_nits, m_hdr_display), 0.0f};
+    float pix_consts[4] = {static_cast<float>(static_cast<uint32_t>(m_output_mode)), m_composite_paper_white_nits,
+        ColorSpace::scrgb_white_scale(m_composite_paper_white_nits, m_hdr_display), 0.0f};
     cmd_list->SetGraphicsRoot32BitConstants(1, 4, pix_consts, 0);
 
     // Copy the scene backbuffer, then run color-managed composition in shader.
-    auto bb_index = m_swapchain->GetCurrentBackBufferIndex();
     D3D12_RESOURCE_BARRIER pre_copy_barriers[2]{};
     pre_copy_barriers[0].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
     pre_copy_barriers[0].Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
-    pre_copy_barriers[0].Transition.pResource = m_rts[bb_index].Get();
+    pre_copy_barriers[0].Transition.pResource = backbuffer.Get();
     pre_copy_barriers[0].Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
     pre_copy_barriers[0].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
     pre_copy_barriers[1].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -411,12 +447,12 @@ void D3D12Renderer::render(std::function<void(D2DPainter&)> draw_fn, bool update
     pre_copy_barriers[1].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
     cmd_list->ResourceBarrier(2, pre_copy_barriers);
 
-    cmd_list->CopyResource(scene_copy.Get(), m_rts[bb_index].Get());
+    cmd_list->CopyResource(scene_copy.Get(), backbuffer.Get());
 
     D3D12_RESOURCE_BARRIER post_copy_barriers[2]{};
     post_copy_barriers[0].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
     post_copy_barriers[0].Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
-    post_copy_barriers[0].Transition.pResource = m_rts[bb_index].Get();
+    post_copy_barriers[0].Transition.pResource = backbuffer.Get();
     post_copy_barriers[0].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
     post_copy_barriers[0].Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
     post_copy_barriers[1].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -427,7 +463,8 @@ void D3D12Renderer::render(std::function<void(D2DPainter&)> draw_fn, bool update
     cmd_list->ResourceBarrier(2, post_copy_barriers);
 
     D3D12_CPU_DESCRIPTOR_HANDLE rts[1]{};
-    rts[0] = get_cpu_rtv((RTV)bb_index);
+    rts[0] = get_cpu_rtv();
+    m_device->CreateRenderTargetView(backbuffer.Get(), nullptr, rts[0]);
     cmd_list->OMSetRenderTargets(1, rts, FALSE, NULL);
     cmd_list->SetDescriptorHeaps(1, m_srv_heap.GetAddressOf());
 
@@ -438,22 +475,22 @@ void D3D12Renderer::render(std::function<void(D2DPainter&)> draw_fn, bool update
     D3D12_RESOURCE_BARRIER present_barrier{};
     present_barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
     present_barrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
-    present_barrier.Transition.pResource = m_rts[bb_index].Get();
+    present_barrier.Transition.pResource = backbuffer.Get();
     present_barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
     present_barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
     cmd_list->ResourceBarrier(1, &present_barrier);
 
     // end(...) calls Close() on the command list.
     cmd_context->end(m_cmd_queue.Get());
+    return repainted;
 }
 
 void D3D12Renderer::set_paper_white_nits(float nits) {
     m_paper_white_nits = std::clamp(nits, 80.0f, 1000.0f);
 }
 
-void D3D12Renderer::refresh_output_mode() {
-    auto bb_index = m_swapchain->GetCurrentBackBufferIndex();
-    const auto format = m_rts[bb_index]->GetDesc().Format;
+void D3D12Renderer::refresh_output_mode(IDXGISwapChain3* swapchain) {
+    const auto format = m_backbuffer_format;
 
     m_hdr_display = (format == DXGI_FORMAT_R16G16B16A16_FLOAT || format == DXGI_FORMAT_R10G10B10A2_UNORM) &&
         m_display_info.is_hdr(m_output_window);
@@ -472,13 +509,43 @@ void D3D12Renderer::refresh_output_mode() {
     UINT pq_support = 0;
     bool can_present_pq = false;
 
-    if (SUCCEEDED(m_swapchain->CheckColorSpaceSupport(DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020, &pq_support))) {
+    if (SUCCEEDED(swapchain->CheckColorSpaceSupport(DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020, &pq_support))) {
         can_present_pq = (pq_support & DXGI_SWAP_CHAIN_COLOR_SPACE_SUPPORT_FLAG_PRESENT) != 0;
     }
 
-    if (!can_present_pq && SUCCEEDED(m_swapchain->CheckColorSpaceSupport(DXGI_COLOR_SPACE_RGB_STUDIO_G2084_NONE_P2020, &pq_support))) {
+    if (!can_present_pq && SUCCEEDED(swapchain->CheckColorSpaceSupport(DXGI_COLOR_SPACE_RGB_STUDIO_G2084_NONE_P2020, &pq_support))) {
         can_present_pq = (pq_support & DXGI_SWAP_CHAIN_COLOR_SPACE_SUPPORT_FLAG_PRESENT) != 0;
     }
 
     m_output_mode = (m_hdr_display && can_present_pq) ? OutputMode::HDR10_PQ : OutputMode::SDR;
+}
+
+bool D3D12Renderer::ready_to_destroy() noexcept {
+    if (FAILED(m_device->GetDeviceRemovedReason())) return true;
+    if (!m_tail_signalled) {
+        try {
+            m_d3d11_context->Flush();
+            m_tail->signal(m_cmd_queue.Get());
+            m_tail_signalled = true;
+        } catch (...) { return false; }
+    }
+    return m_tail->completed();
+}
+
+void D3D12Renderer::wait_for_idle() {
+    auto renderer_lock = lock();
+    m_d3d11_context->Flush();
+    m_tail->signal(m_cmd_queue.Get());
+    m_tail->wait(10000);
+    m_tail_signalled = false;
+}
+
+bool D3D12Renderer::matches(IDXGISwapChain* swapchain, ID3D12Device* device, ID3D12CommandQueue* queue) const {
+    if (!swapchain || device != m_device.Get() || queue != m_cmd_queue.Get()) return false;
+    ComPtr<IDXGISwapChain3> current;
+    if (FAILED(swapchain->QueryInterface(IID_PPV_ARGS(&current))) || reinterpret_cast<uintptr_t>(current.Get()) != m_swapchain_identity) return false;
+    DXGI_SWAP_CHAIN_DESC desc{};
+    return SUCCEEDED(current->GetDesc(&desc)) && desc.BufferDesc.Width == m_width &&
+        desc.BufferDesc.Height == m_height && desc.BufferDesc.Format == m_backbuffer_format &&
+        desc.BufferCount == m_frames_in_flight && desc.OutputWindow == m_output_window;
 }

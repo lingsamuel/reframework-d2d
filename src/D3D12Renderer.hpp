@@ -1,3 +1,5 @@
+#pragma once
+
 #include <chrono>
 #include <cstdint>
 #include <functional>
@@ -16,15 +18,6 @@
 
 class D3D12Renderer {
 public:
-    enum class RTV : int {
-        BACKBUFFER_0,
-        BACKBUFFER_1,
-        BACKBUFFER_2,
-        BACKBUFFER_3,
-        D2D,
-        COUNT,
-    };
-
     enum class OutputMode : uint32_t {
         SDR = 0,
         HDR10_PQ = 1,
@@ -32,17 +25,17 @@ public:
     };
 
     D3D12Renderer(IDXGISwapChain* swapchain_, ID3D12Device* device_, ID3D12CommandQueue* cmd_queue_);
-    virtual ~D3D12Renderer() {
-        // Give the command contexts priority cleanup before everything else
-        // so any command lists can finish executing before destroying everything
-        for (auto& cmd_context : m_cmd_contexts) {
-            cmd_context->reset();
-        }
+    // Destruction follows ready_to_destroy(), or an explicit successful wait_for_idle().
+    ~D3D12Renderer() noexcept = default;
+    // Called only after the last CPU lease has gone away. Retries a failed tail Signal.
+    bool ready_to_destroy() noexcept;
+    bool matches(IDXGISwapChain* swapchain, ID3D12Device* device, ID3D12CommandQueue* queue) const;
+    void wait_for_idle();
+    auto try_lock() { return std::unique_lock<std::recursive_mutex>{m_mutex, std::try_to_lock}; }
+    auto lock() { return std::unique_lock<std::recursive_mutex>{m_mutex}; }
 
-        m_cmd_contexts.clear();
-    }
-
-    void render(std::function<void(D2DPainter&)> draw_fn, bool update_d2d);
+    // Returns true only when the overlay was repainted; deferred requests remain pending.
+    bool render(IDXGISwapChain* swapchain, std::function<void(D2DPainter&)> draw_fn, bool update_d2d);
 
     auto& get_d2d() { return m_d2d; }
     bool is_hdr_output() const {
@@ -67,7 +60,8 @@ private:
         unsigned int color;
     };
 
-    ComPtr<IDXGISwapChain3> m_swapchain{};
+    // Identity only, never dereferenced or AddRef'd across host callbacks.
+    uintptr_t m_swapchain_identity{};
     ComPtr<ID3D12Device> m_device{};
     ComPtr<ID3D12CommandQueue> m_cmd_queue{};
 
@@ -78,7 +72,10 @@ private:
 
     ComPtr<ID3D12DescriptorHeap> m_rtv_heap{};
     ComPtr<ID3D12DescriptorHeap> m_srv_heap{};
-    ComPtr<ID3D12Resource> m_rts[(int)RTV::COUNT]{};
+    ComPtr<ID3D12Resource> m_overlay;
+    std::recursive_mutex m_mutex;
+    std::unique_ptr<D3D12CommandContext> m_tail;
+    bool m_tail_signalled{};
 
     ComPtr<ID3D12RootSignature> m_root_signature{};
     ComPtr<ID3D12PipelineState> m_pipeline_state{};
@@ -96,19 +93,20 @@ private:
     int m_height{};
     OutputMode m_output_mode{OutputMode::SDR};
     float m_paper_white_nits{200.0f};
+    // Present's copy remains stable when a Lua resource operation owns m_mutex.
+    float m_composite_paper_white_nits{200.0f};
+    bool m_overlay_valid{};
     HWND m_output_window{};
     HDRDisplayInfo m_display_info{};
     bool m_hdr_display{};
 
     std::unique_ptr<D2DPainter> m_d2d{};
-    void refresh_output_mode();
+    void refresh_output_mode(IDXGISwapChain3* swapchain);
+    DXGI_FORMAT m_backbuffer_format{};
     uint32_t get_srv_index(uint32_t frame_index, uint32_t slot) const { return frame_index * SRV_SLOTS_PER_FRAME + slot; }
 
-    auto& get_rt(RTV rtv) { return m_rts[(int)rtv]; }
-
-    D3D12_CPU_DESCRIPTOR_HANDLE get_cpu_rtv(RTV rtv) {
-        return {m_rtv_heap->GetCPUDescriptorHandleForHeapStart().ptr +
-                (int)rtv * m_device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV)};
+    D3D12_CPU_DESCRIPTOR_HANDLE get_cpu_rtv() {
+        return m_rtv_heap->GetCPUDescriptorHandleForHeapStart();
     }
 
     D3D12_CPU_DESCRIPTOR_HANDLE get_cpu_srv(uint32_t index) {

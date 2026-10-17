@@ -65,7 +65,7 @@ void D2DPainter::begin() {
 }
 
 void D2DPainter::end() {
-    m_context->EndDraw();
+    if (FAILED(m_context->EndDraw())) throw std::runtime_error{"D2D EndDraw failed"};
 }
 
 bool D2DPainter::set_linear_blending(bool enabled) {
@@ -89,6 +89,7 @@ void D2DPainter::set_color(unsigned int color) {
 }
 
 void D2DPainter::text(std::shared_ptr<D2DFont>& font, const std::string& text, float x, float y, unsigned int color) {
+    if (!font) throw std::runtime_error{"Invalid D2D font"};
     set_color(color);
     m_context->DrawTextLayout({x, y}, font->layout(text).Get(), m_brush.Get());
 }
@@ -157,12 +158,17 @@ void D2DPainter::line(float x1, float y1, float x2, float y2, float thickness, u
 }
 
 void D2DPainter::image(std::shared_ptr<D2DImage>& image, float x, float y, float alpha) {
+    if (!image) throw std::runtime_error{"Invalid D2D image"};
     auto [w, h] = image->size();
-    m_context->DrawBitmap(image->bitmap(m_linear_blending), {x, y, x + w, y + h}, alpha);
+    if (!image) throw std::runtime_error{"Invalid D2D image"};
+    auto bitmap = image->bitmap(m_context.Get(), m_linear_blending);
+    m_context->DrawBitmap(bitmap.Get(), {x, y, x + w, y + h}, alpha);
 }
 
 void D2DPainter::image(std::shared_ptr<D2DImage>& image, float x, float y, float w, float h, float alpha) {
-    m_context->DrawBitmap(image->bitmap(m_linear_blending), {x, y, x + w, y + h}, alpha);
+    if (!image) throw std::runtime_error{"Invalid D2D image"};
+    auto bitmap = image->bitmap(m_context.Get(), m_linear_blending);
+    m_context->DrawBitmap(bitmap.Get(), {x, y, x + w, y + h}, alpha);
 }
 
 void D2DPainter::fill_circle(float centerX, float centerY, float radius, unsigned int color) {

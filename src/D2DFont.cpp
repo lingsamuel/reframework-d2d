@@ -94,6 +94,8 @@ D2DFont::D2DFont(
 }
 
 D2DFont::ComPtr<IDWriteTextLayout> D2DFont::layout(const std::string& text) {
+    // measure() is also callable outside the draw callback on a different thread.
+    std::scoped_lock lock{m_layout_mutex};
     if (auto l = m_layouts.get(text)) {
         return (*l).get();
     }

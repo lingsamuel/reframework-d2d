@@ -2,6 +2,7 @@
 
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -155,7 +156,7 @@ public:
 
     struct [[nodiscard]] CommandLock {
         std::vector<Command>& commands;
-        std::scoped_lock<std::mutex> lock;
+        std::unique_lock<std::mutex> lock;
 
         void text(std::shared_ptr<D2DFont>& font, std::string text, float x, float y, unsigned int color);
         void fill_rect(float x, float y, float w, float h, unsigned int color);
@@ -175,7 +176,13 @@ public:
             unsigned int color, bool clockwise);
     };
 
-    auto acquire() { return CommandLock{m_commands, std::scoped_lock{m_commands_mux}}; }
+    auto acquire() { return CommandLock{m_commands, std::unique_lock{m_commands_mux}}; }
+
+    std::optional<CommandLock> try_acquire() {
+        std::unique_lock lock{m_commands_mux, std::try_to_lock};
+        if (!lock.owns_lock()) return std::nullopt;
+        return CommandLock{m_commands, std::move(lock)};
+    }
 
 private:
     std::vector<Command> m_commands{};

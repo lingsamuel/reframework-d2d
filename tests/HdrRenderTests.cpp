@@ -15,6 +15,19 @@ using Microsoft::WRL::ComPtr;
 
 void test_on12_composition();
 void test_on12_scrgb_white();
+void test_context_pending_timeout();
+void test_on12_callback_exception();
+void test_on12_resolution_reset();
+void test_renderer_retirement();
+void test_live_renderer_does_not_pin_backbuffers();
+void test_plugin_lifecycle();
+void test_failed_frame_signal();
+void test_failed_tail_signal();
+void test_font_cache_concurrency();
+void test_device_removal_retirement();
+void test_many_backbuffers();
+void test_retired_renderer_does_not_pin_swapchain();
+void test_cached_overlay_during_graphics_access();
 
 namespace {
 struct Pixel { float r, g, b, a; };
@@ -209,7 +222,7 @@ private:
 };
 }
 
-int main() {
+int main(int argc, char** argv) {
     check(CoInitializeEx(nullptr, COINIT_MULTITHREADED));
     int failures = 0;
     const std::vector<std::pair<const char*, std::function<void()>>> tests{
@@ -317,6 +330,22 @@ int main() {
             f.painter->end();
             expect_near(f.render(0, {0, 0, 0, 1}).r, 128.0f / 255.0f * 0.5f);
         }},
+        {"Image loading during drawing preserves the active batch", [] {
+            Fixture f;
+            f.painter->begin();
+            TestImage image(*f.painter, 0xFFFFFFFF);
+            f.painter->fill_rect(0, 0, 1, 1, 0xFFFFFFFF);
+            f.painter->end();
+            expect_near(f.render(0, {0, 0, 0, 1}).r, 1.0f);
+        }},
+        {"Images survive replacement of the D2D device", [] {
+            Fixture first, second;
+            TestImage image(*first.painter, 0xFFFFFFFF);
+            second.painter->begin();
+            second.painter->image(image.image, 0, 0, 1);
+            second.painter->end();
+            expect_near(second.render(0, {0, 0, 0, 1}).r, 1.0f);
+        }},
         {"Image conversion restores the previous D2D target", [] {
             Fixture f;
             f.painter->begin(); f.painter->end();
@@ -349,13 +378,30 @@ int main() {
             check(D3DCompile(D3D12_VERT_SHADER, std::strlen(D3D12_VERT_SHADER), nullptr, nullptr, nullptr,
                 "main", "vs_5_0", 0, 0, &code, &errors));
         }},
+        {"Retirement waits for CPU leases and the GPU tail", test_renderer_retirement},
+        {"Live renderer does not pin backbuffers", test_live_renderer_does_not_pin_backbuffers},
+        {"Plugin Lua lifecycle and concurrent reset", test_plugin_lifecycle},
+        {"Failed frame Signal prevents allocator reuse", test_failed_frame_signal},
+        {"Failed tail Signal retries retirement", test_failed_tail_signal},
+        {"Font cache concurrent measurement and layout", test_font_cache_concurrency},
+        {"Device removal retires resources without Reset", test_device_removal_retirement},
+        {"Six backbuffers have no fixed-array limit", test_many_backbuffers},
+        {"Retired renderer does not pin swapchain", test_retired_renderer_does_not_pin_swapchain},
+        {"Cached overlay survives busy graphics access", test_cached_overlay_during_graphics_access},
+        {"GPU pending timeout", test_context_pending_timeout},
+        {"D3D11On12 callback exception", test_on12_callback_exception},
+        {"D3D11On12 resolution reset", test_on12_resolution_reset},
         {"D3D11On12 FP16 overlay and cached SDR composition", test_on12_composition},
         {"D3D11On12 scRGB paper white follows display HDR state", test_on12_scrgb_white},
     };
+    int matched = 0;
     for (const auto& [name, run] : tests) {
+        if (argc > 1 && std::string(name).find(argv[1]) == std::string::npos) continue;
+        ++matched;
         try { run(); std::cout << "PASS: " << name << '\n'; }
         catch (const std::exception& e) { ++failures; std::cerr << "FAIL: " << name << ": " << e.what() << '\n'; }
     }
+    if (!matched) { ++failures; std::cerr << "FAIL: no test matched the filter\n"; }
     CoUninitialize();
     return failures == 0 ? 0 : 1;
 }

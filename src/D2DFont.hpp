@@ -2,6 +2,7 @@
 
 #include <filesystem>
 #include <string>
+#include <mutex>
 #include <tuple>
 
 #include <d2d1.h>
@@ -26,5 +27,6 @@ private:
     ComPtr<IDWriteFontFile> m_fontFile{};
     ComPtr<IDWriteFontCollection1> m_fontCollection{};
     ComPtr<IDWriteTextFormat> m_format{};
+    std::mutex m_layout_mutex;
     LruCache<std::string, ComPtr<IDWriteTextLayout>> m_layouts{100};
 };
