@@ -6,6 +6,8 @@
 #include <vector>
 
 #include <d3dcompiler.h>
+#include <d3d12.h>
+#include <d3d12sdklayers.h>
 
 #include "D2DPainter.hpp"
 #include "D3D12Shaders.hpp"
@@ -29,6 +31,9 @@ void test_many_backbuffers();
 void test_retired_renderer_does_not_pin_swapchain();
 void test_cached_overlay_during_graphics_access();
 void test_drawlist_batch_ownership();
+void test_direct_composition_resources();
+void test_direct_composition_pixels();
+void test_hdr10_shared_scene_in_flight();
 
 namespace {
 struct Pixel { float r, g, b, a; };
@@ -224,6 +229,8 @@ private:
 }
 
 int main(int argc, char** argv) {
+    ComPtr<ID3D12Debug> debug;
+    if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debug)))) debug->EnableDebugLayer();
     check(CoInitializeEx(nullptr, COINIT_MULTITHREADED));
     int failures = 0;
     const std::vector<std::pair<const char*, std::function<void()>>> tests{
@@ -390,6 +397,9 @@ int main(int argc, char** argv) {
         {"Retired renderer does not pin swapchain", test_retired_renderer_does_not_pin_swapchain},
         {"Cached overlay survives busy graphics access", test_cached_overlay_during_graphics_access},
         {"Command batch ownership preserves storage and text", test_drawlist_batch_ownership},
+        {"Direct composition allocates no scene copies", test_direct_composition_resources},
+        {"Direct composition preserves SDR and extended scRGB pixels", test_direct_composition_pixels},
+        {"HDR10 reuses one scene with several GPU frames in flight", test_hdr10_shared_scene_in_flight},
         {"GPU pending timeout", test_context_pending_timeout},
         {"D3D11On12 callback exception", test_on12_callback_exception},
         {"D3D11On12 resolution reset", test_on12_resolution_reset},

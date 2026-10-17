@@ -46,13 +46,14 @@ public:
     void set_paper_white_nits(float nits);
 
 private:
+    friend struct D3D12RendererTestAccess;
     template <typename T> using ComPtr = Microsoft::WRL::ComPtr<T>;
-    // Per-frame SRV layout:
+    // Stable renderer-wide SRVs. The scene slot is bound only by HDR10.
     //   slot 0 -> D2D overlay texture (t0)
     //   slot 1 -> copied scene backbuffer (t1)
     static constexpr uint32_t SRV_D2D_SLOT = 0;
     static constexpr uint32_t SRV_SCENE_SLOT = 1;
-    static constexpr uint32_t SRV_SLOTS_PER_FRAME = 2;
+    static constexpr uint32_t SRV_COUNT = 2;
 
     struct Vert {
         float x, y;
@@ -73,16 +74,17 @@ private:
     ComPtr<ID3D12DescriptorHeap> m_rtv_heap{};
     ComPtr<ID3D12DescriptorHeap> m_srv_heap{};
     ComPtr<ID3D12Resource> m_overlay;
+    ComPtr<ID3D12Resource> m_scene_copy;
     std::recursive_mutex m_mutex;
     std::unique_ptr<D3D12CommandContext> m_tail;
     bool m_tail_signalled{};
 
     ComPtr<ID3D12RootSignature> m_root_signature{};
     ComPtr<ID3D12PipelineState> m_pipeline_state{};
+    ComPtr<ID3D12PipelineState> m_direct_pipeline_state{};
 
     struct RenderResources {
         ComPtr<ID3D12Resource> vert_buffer{};
-        ComPtr<ID3D12Resource> scene_copy{};
     };
 
     uint32_t m_frames_in_flight{1};
@@ -102,8 +104,9 @@ private:
 
     std::unique_ptr<D2DPainter> m_d2d{};
     void refresh_output_mode(IDXGISwapChain3* swapchain);
+    void ensure_scene_copy();
+    void record_composition(ID3D12GraphicsCommandList* cmd_list, ID3D12Resource* backbuffer, ID3D12Resource* vert_buffer);
     DXGI_FORMAT m_backbuffer_format{};
-    uint32_t get_srv_index(uint32_t frame_index, uint32_t slot) const { return frame_index * SRV_SLOTS_PER_FRAME + slot; }
 
     D3D12_CPU_DESCRIPTOR_HANDLE get_cpu_rtv() {
         return m_rtv_heap->GetCPUDescriptorHandleForHeapStart();

@@ -5,6 +5,7 @@ if(REFD2D_BUILD_TESTS)
     add_executable(hdr-render-tests
         "${_refd2d_test_source_dir}/tests/HdrRenderTests.cpp"
         "${_refd2d_test_source_dir}/tests/HdrOn12Tests.cpp"
+        "${_refd2d_test_source_dir}/tests/CompositionTests.cpp"
         "${_refd2d_test_source_dir}/tests/DrawListTests.cpp"
         "${_refd2d_test_source_dir}/tests/PluginLifecycleTests.cpp"
         "${_refd2d_test_source_dir}/src/Plugin.cpp"

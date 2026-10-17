@@ -45,9 +45,9 @@ D3D12Renderer::D3D12Renderer(IDXGISwapChain* swapchain_, ID3D12Device* device_, 
     }
     m_output_window = swapchain_desc.OutputWindow;
 
-    // Reserve two SRVs per buffered frame: overlay(t0) + scene copy(t1).
+    // Overlay(t0) and the lazily created HDR10 scene copy(t1) have stable slots.
     D3D12_DESCRIPTOR_HEAP_DESC srv_desc = {};
-    srv_desc.NumDescriptors = swapchain_desc.BufferCount * SRV_SLOTS_PER_FRAME;
+    srv_desc.NumDescriptors = SRV_COUNT;
     srv_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
     srv_desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
 
@@ -121,14 +121,8 @@ D3D12Renderer::D3D12Renderer(IDXGISwapChain* swapchain_, ID3D12Device* device_, 
     m_d2d = std::make_unique<D2DPainter>(m_d3d11_device.Get(), dxgi_surface.Get());
 
     // Create root signature.
-    D3D12_DESCRIPTOR_RANGE desc_range{};
-    desc_range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-    desc_range.NumDescriptors = 2;
-    desc_range.BaseShaderRegister = 0;
-    desc_range.RegisterSpace = 0;
-    desc_range.OffsetInDescriptorsFromTableStart = 0;
-
-    D3D12_ROOT_PARAMETER root_params[3]{};
+    D3D12_DESCRIPTOR_RANGE desc_ranges[2]{};
+    D3D12_ROOT_PARAMETER root_params[4]{};
     root_params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
     root_params[0].Constants.ShaderRegister = 0;
     root_params[0].Constants.RegisterSpace = 0;
@@ -141,10 +135,17 @@ D3D12Renderer::D3D12Renderer(IDXGISwapChain* swapchain_, ID3D12Device* device_, 
     root_params[1].Constants.Num32BitValues = 4;
     root_params[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
-    root_params[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-    root_params[2].DescriptorTable.NumDescriptorRanges = 1;
-    root_params[2].DescriptorTable.pDescriptorRanges = &desc_range;
-    root_params[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    // Separate tables keep the scene descriptor unbound during direct composition.
+    // Its first initialization can then never change a descriptor read by an older frame.
+    for (uint32_t i = 0; i < 2; ++i) {
+        desc_ranges[i].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+        desc_ranges[i].NumDescriptors = 1;
+        desc_ranges[i].BaseShaderRegister = i;
+        root_params[i + 2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        root_params[i + 2].DescriptorTable.NumDescriptorRanges = 1;
+        root_params[i + 2].DescriptorTable.pDescriptorRanges = &desc_ranges[i];
+        root_params[i + 2].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    }
 
     D3D12_STATIC_SAMPLER_DESC sampler_desc{};
     sampler_desc.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
@@ -161,7 +162,7 @@ D3D12Renderer::D3D12Renderer(IDXGISwapChain* swapchain_, ID3D12Device* device_, 
     sampler_desc.RegisterSpace = 0;
 
     D3D12_ROOT_SIGNATURE_DESC sig_desc{};
-    sig_desc.NumParameters = 3;
+    sig_desc.NumParameters = 4;
     sig_desc.pParameters = root_params;
     sig_desc.NumStaticSamplers = 1;
     sig_desc.pStaticSamplers = &sampler_desc;
@@ -252,18 +253,18 @@ D3D12Renderer::D3D12Renderer(IDXGISwapChain* swapchain_, ID3D12Device* device_, 
         throw std::runtime_error{"Failed to create pipeline state"};
     }
 
-    D3D12_RESOURCE_DESC scene_desc{};
-    scene_desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-    scene_desc.Alignment = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT;
-    scene_desc.Width = backbuffer_desc.Width;
-    scene_desc.Height = backbuffer_desc.Height;
-    scene_desc.DepthOrArraySize = 1;
-    scene_desc.MipLevels = 1;
-    scene_desc.Format = backbuffer_desc.Format;
-    scene_desc.SampleDesc.Count = 1;
-    scene_desc.SampleDesc.Quality = 0;
-    scene_desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
-    scene_desc.Flags = D3D12_RESOURCE_FLAG_NONE;
+    ComPtr<ID3DBlob> direct_pixshader_blob;
+    if (FAILED(D3DCompile(D3D12_PIX_SHADER, strlen(D3D12_PIX_SHADER), nullptr, nullptr, nullptr,
+            "direct_main", "ps_5_0", 0, 0, &direct_pixshader_blob, nullptr))) {
+        throw std::runtime_error{"Failed to compile direct composition pixel shader"};
+    }
+    pso_desc.PS = {direct_pixshader_blob->GetBufferPointer(), direct_pixshader_blob->GetBufferSize()};
+    blend.RenderTarget[0].BlendEnable = true;
+    blend.RenderTarget[0].DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
+    blend.RenderTarget[0].DestBlendAlpha = D3D12_BLEND_INV_SRC_ALPHA;
+    if (FAILED(m_device->CreateGraphicsPipelineState(&pso_desc, IID_PPV_ARGS(&m_direct_pipeline_state)))) {
+        throw std::runtime_error{"Failed to create direct composition pipeline state"};
+    }
 
     D3D12_SHADER_RESOURCE_VIEW_DESC d2d_srv_desc{};
     d2d_srv_desc.Format = d2d_desc.Format;
@@ -271,11 +272,7 @@ D3D12Renderer::D3D12Renderer(IDXGISwapChain* swapchain_, ID3D12Device* device_, 
     d2d_srv_desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
     d2d_srv_desc.Texture2D.MipLevels = 1;
 
-    D3D12_SHADER_RESOURCE_VIEW_DESC scene_srv_desc{};
-    scene_srv_desc.Format = backbuffer_desc.Format;
-    scene_srv_desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-    scene_srv_desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-    scene_srv_desc.Texture2D.MipLevels = 1;
+    m_device->CreateShaderResourceView(m_overlay.Get(), &d2d_srv_desc, get_cpu_srv(SRV_D2D_SLOT));
 
     for (uint32_t i = 0; i < m_frames_in_flight; i++) {
         auto resources = std::make_unique<RenderResources>();
@@ -325,16 +322,6 @@ D3D12Renderer::D3D12Renderer(IDXGISwapChain* swapchain_, ID3D12Device* device_, 
 
         vert_buffer->Unmap(0, &range);
 
-        if (FAILED(m_device->CreateCommittedResource(&d2d_heap_props, D3D12_HEAP_FLAG_NONE, &scene_desc,
-                D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, nullptr, IID_PPV_ARGS(&resources->scene_copy)))) {
-            throw std::runtime_error{"Failed to create scene copy render target"};
-        }
-
-        // Write this frame's two SRV descriptors contiguously in the global heap.
-        m_device->CreateShaderResourceView(
-            m_overlay.Get(), &d2d_srv_desc, get_cpu_srv(get_srv_index(i, SRV_D2D_SLOT)));
-        m_device->CreateShaderResourceView(
-            resources->scene_copy.Get(), &scene_srv_desc, get_cpu_srv(get_srv_index(i, SRV_SCENE_SLOT)));
         m_render_resources.push_back(std::move(resources));
     }
 }
@@ -391,9 +378,14 @@ bool D3D12Renderer::render(IDXGISwapChain* swapchain_, std::function<void(D2DPai
     // Composition touches only Present-owned D3D12 state and the completed overlay.
     // Do it even while Lua owns the D2D lock; never sample a never-painted texture.
     if (!m_overlay_valid) return false;
-    auto& vert_buffer = resources->vert_buffer;
-    auto& scene_copy = resources->scene_copy;
+    record_composition(cmd_list.Get(), backbuffer.Get(), resources->vert_buffer.Get());
+    cmd_context->end(m_cmd_queue.Get());
+    return repainted;
+}
 
+void D3D12Renderer::record_composition(
+    ID3D12GraphicsCommandList* cmd_list, ID3D12Resource* backbuffer, ID3D12Resource* vert_buffer) {
+    const bool hdr10 = m_output_mode == OutputMode::HDR10_PQ;
     auto L = 0.0f;
     auto R = (float)m_width;
     auto T = 0.0f;
@@ -426,63 +418,96 @@ bool D3D12Renderer::render(IDXGISwapChain* swapchain_, std::function<void(D2DPai
     vbv.StrideInBytes = sizeof(Vert);
     cmd_list->IASetVertexBuffers(0, 1, &vbv);
     cmd_list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    cmd_list->SetPipelineState(m_pipeline_state.Get());
+    cmd_list->SetPipelineState(hdr10 ? m_pipeline_state.Get() : m_direct_pipeline_state.Get());
     cmd_list->SetGraphicsRootSignature(m_root_signature.Get());
     cmd_list->SetGraphicsRoot32BitConstants(0, 16, mvp, 0);
     float pix_consts[4] = {static_cast<float>(static_cast<uint32_t>(m_output_mode)), m_composite_paper_white_nits,
         ColorSpace::scrgb_white_scale(m_composite_paper_white_nits, m_hdr_display), 0.0f};
     cmd_list->SetGraphicsRoot32BitConstants(1, 4, pix_consts, 0);
 
-    // Copy the scene backbuffer, then run color-managed composition in shader.
-    D3D12_RESOURCE_BARRIER pre_copy_barriers[2]{};
-    pre_copy_barriers[0].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-    pre_copy_barriers[0].Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
-    pre_copy_barriers[0].Transition.pResource = backbuffer.Get();
-    pre_copy_barriers[0].Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
-    pre_copy_barriers[0].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
-    pre_copy_barriers[1].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-    pre_copy_barriers[1].Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
-    pre_copy_barriers[1].Transition.pResource = scene_copy.Get();
-    pre_copy_barriers[1].Transition.StateBefore = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-    pre_copy_barriers[1].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
-    cmd_list->ResourceBarrier(2, pre_copy_barriers);
+    if (hdr10) {
+        ensure_scene_copy();
+        // All submissions use the same queue. The SRV -> COPY_DEST transition
+        // orders earlier scene reads before this overwrite, even with several frames in flight.
+        D3D12_RESOURCE_BARRIER pre_copy_barriers[2]{};
+        pre_copy_barriers[0].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        pre_copy_barriers[0].Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+        pre_copy_barriers[0].Transition.pResource = backbuffer;
+        pre_copy_barriers[0].Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
+        pre_copy_barriers[0].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        pre_copy_barriers[1].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        pre_copy_barriers[1].Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+        pre_copy_barriers[1].Transition.pResource = m_scene_copy.Get();
+        pre_copy_barriers[1].Transition.StateBefore = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        pre_copy_barriers[1].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
+        cmd_list->ResourceBarrier(2, pre_copy_barriers);
 
-    cmd_list->CopyResource(scene_copy.Get(), backbuffer.Get());
+        cmd_list->CopyResource(m_scene_copy.Get(), backbuffer);
 
-    D3D12_RESOURCE_BARRIER post_copy_barriers[2]{};
-    post_copy_barriers[0].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-    post_copy_barriers[0].Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
-    post_copy_barriers[0].Transition.pResource = backbuffer.Get();
-    post_copy_barriers[0].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
-    post_copy_barriers[0].Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
-    post_copy_barriers[1].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-    post_copy_barriers[1].Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
-    post_copy_barriers[1].Transition.pResource = scene_copy.Get();
-    post_copy_barriers[1].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
-    post_copy_barriers[1].Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-    cmd_list->ResourceBarrier(2, post_copy_barriers);
+        D3D12_RESOURCE_BARRIER post_copy_barriers[2]{};
+        post_copy_barriers[0].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        post_copy_barriers[0].Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+        post_copy_barriers[0].Transition.pResource = backbuffer;
+        post_copy_barriers[0].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        post_copy_barriers[0].Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
+        post_copy_barriers[1].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        post_copy_barriers[1].Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+        post_copy_barriers[1].Transition.pResource = m_scene_copy.Get();
+        post_copy_barriers[1].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+        post_copy_barriers[1].Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        cmd_list->ResourceBarrier(2, post_copy_barriers);
+
+    } else {
+        D3D12_RESOURCE_BARRIER barrier{};
+        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barrier.Transition.pResource = backbuffer;
+        barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
+        barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
+        cmd_list->ResourceBarrier(1, &barrier);
+    }
 
     D3D12_CPU_DESCRIPTOR_HANDLE rts[1]{};
     rts[0] = get_cpu_rtv();
-    m_device->CreateRenderTargetView(backbuffer.Get(), nullptr, rts[0]);
+    m_device->CreateRenderTargetView(backbuffer, nullptr, rts[0]);
     cmd_list->OMSetRenderTargets(1, rts, FALSE, NULL);
     cmd_list->SetDescriptorHeaps(1, m_srv_heap.GetAddressOf());
 
-    // Bind this frame's SRV pair (t0 = D2D overlay, t1 = scene copy) and composite.
-    cmd_list->SetGraphicsRootDescriptorTable(2, get_gpu_srv(get_srv_index(frame_index, SRV_D2D_SLOT)));
+    cmd_list->SetGraphicsRootDescriptorTable(2, get_gpu_srv(SRV_D2D_SLOT));
+    if (hdr10) cmd_list->SetGraphicsRootDescriptorTable(3, get_gpu_srv(SRV_SCENE_SLOT));
     cmd_list->DrawInstanced(6, 1, 0, 0);
 
     D3D12_RESOURCE_BARRIER present_barrier{};
     present_barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
     present_barrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
-    present_barrier.Transition.pResource = backbuffer.Get();
+    present_barrier.Transition.pResource = backbuffer;
     present_barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
     present_barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
     cmd_list->ResourceBarrier(1, &present_barrier);
 
-    // end(...) calls Close() on the command list.
-    cmd_context->end(m_cmd_queue.Get());
-    return repainted;
+}
+
+void D3D12Renderer::ensure_scene_copy() {
+    if (m_scene_copy) return;
+    D3D12_RESOURCE_DESC desc{};
+    desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    desc.Width = m_width;
+    desc.Height = m_height;
+    desc.DepthOrArraySize = desc.MipLevels = desc.SampleDesc.Count = 1;
+    desc.Format = m_backbuffer_format;
+    D3D12_HEAP_PROPERTIES heap{};
+    heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+    if (FAILED(m_device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
+            D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, nullptr, IID_PPV_ARGS(&m_scene_copy)))) {
+        throw std::runtime_error{"Failed to create HDR10 scene copy"};
+    }
+    D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+    srv.Format = m_backbuffer_format;
+    srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srv.Texture2D.MipLevels = 1;
+    m_device->CreateShaderResourceView(m_scene_copy.Get(), &srv, get_cpu_srv(SRV_SCENE_SLOT));
+    // Keep both resource and descriptor until retirement, including temporary SDR mode.
+    // Releasing/reinitializing either here would invalidate previously submitted HDR10 work.
 }
 
 void D3D12Renderer::set_paper_white_nits(float nits) {

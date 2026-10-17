@@ -37,6 +37,22 @@ claim to reproduce an unspecified game crash. Continuity tests clear the scene a
 rotate swapchain buffers before checking pixels, so old backbuffer contents cannot
 hide a skipped HUD composition.
 
+Composition tests inspect actual scene-resource ownership: SDR/scRGB allocate no
+scene texture, while HDR10 lazily creates one stable texture shared across frames.
+Native D3D12 pixel readbacks cover colored backgrounds, transparent HUD pixels,
+negative and extended scRGB values, and 80/200/1000-nit paper white. A queue gate
+keeps six composition submissions in flight across SDR/HDR10 switches; each result
+is captured before the next frame overwrites the target. The test calls the same
+composition recording function as Present, so HDR10 coverage does not require an
+HDR monitor. Expected HDR10 values are calculated by a double-precision CPU PQ
+reference, including the scene's R10 quantization.
+
+When the D3D12 debug layer is installed it is enabled before device creation, and
+the composition tests reject error/corruption messages. Only the existing
+`REFLECTSHAREDPROPERTIES_INVALIDOBJECT` probe from successful D3D11On12 wrapping
+is excluded during fixture initialization; that ID is still an error during drawing.
+These checks validate resource reduction and pixel semantics, not game frame-rate gains.
+
 
 Frame handoff ownership tests run as the separate `frame-mailbox-tests` CTest target.
 They check held-slot stability, latest publication, zero frame copies, producer-side

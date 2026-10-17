@@ -109,4 +109,17 @@ float4 main(PS_INPUT input) : SV_TARGET {
     float3 out_scrgb = overlay_scrgb + scene.rgb * (1.0f - alpha);
     return float4(out_scrgb, out_alpha);
 }
+
+// Fixed-function ONE / INV_SRC_ALPHA blending reads the destination directly.
+// PQ must use main() instead: blending encoded PQ values would darken translucent pixels.
+float4 direct_main(PS_INPUT input) : SV_TARGET {
+    float4 overlay = input.color * overlay_tex.Sample(sampler0, input.uv);
+    if (overlay.a == 0.0f) {
+        discard;
+    }
+    if (output_mode > 1.5f) {
+        overlay.rgb *= sc_rgb_scale;
+    }
+    return overlay;
+}
 )";

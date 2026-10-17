@@ -1,5 +1,8 @@
 #pragma once
 #include <stdexcept>
+#include <array>
+#include <cstring>
+#include <cstdint>
 #include <DirectXPackedVector.h>
 #include "D3D12Renderer.hpp"
 
@@ -8,6 +11,74 @@ using Microsoft::WRL::ComPtr;
 inline void check_hr(HRESULT hr) {
     if (FAILED(hr)) throw std::runtime_error("D3D12 HRESULT: " + std::to_string(static_cast<unsigned long>(hr)));
 }
+// Queue a snapshot now and read it only after the caller's fence completes.
+// Keeping readback separate from waiting allows tests to leave several frames in flight.
+class PixelReadback {
+public:
+    PixelReadback(ID3D12Device* device, ID3D12Resource* texture) {
+        auto desc = texture->GetDesc();
+        m_format = desc.Format;
+        UINT64 size{};
+        device->GetCopyableFootprints(&desc, 0, 1, 0, &m_footprint, nullptr, nullptr, &size);
+        D3D12_HEAP_PROPERTIES heap{};
+        heap.Type = D3D12_HEAP_TYPE_READBACK;
+        D3D12_RESOURCE_DESC buffer{};
+        buffer.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        buffer.Width = size;
+        buffer.Height = buffer.DepthOrArraySize = buffer.MipLevels = buffer.SampleDesc.Count = 1;
+        buffer.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        check_hr(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &buffer,
+            D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&m_buffer)));
+    }
+
+    void record(ID3D12GraphicsCommandList* commands, ID3D12Resource* texture) {
+        D3D12_RESOURCE_BARRIER barrier{};
+        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barrier.Transition.pResource = texture;
+        barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
+        barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        commands->ResourceBarrier(1, &barrier);
+        D3D12_TEXTURE_COPY_LOCATION source{}, destination{};
+        source.pResource = texture;
+        source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        destination.pResource = m_buffer.Get();
+        destination.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        destination.PlacedFootprint = m_footprint;
+        commands->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
+        barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
+        commands->ResourceBarrier(1, &barrier);
+    }
+
+    std::array<float, 4> pixel() const {
+        void* pixels{};
+        D3D12_RANGE range{0, m_format == DXGI_FORMAT_R16G16B16A16_FLOAT ? 8u : 4u};
+        check_hr(m_buffer->Map(0, &range, &pixels));
+        std::array<float, 4> result{};
+        if (m_format == DXGI_FORMAT_R16G16B16A16_FLOAT) {
+            unsigned short channels[4];
+            std::memcpy(channels, pixels, sizeof(channels));
+            for (size_t i = 0; i < 4; ++i) result[i] = DirectX::PackedVector::XMConvertHalfToFloat(channels[i]);
+        } else if (m_format == DXGI_FORMAT_R10G10B10A2_UNORM) {
+            uint32_t packed;
+            std::memcpy(&packed, pixels, sizeof(packed));
+            for (size_t i = 0; i < 3; ++i) result[i] = ((packed >> (i * 10)) & 1023) / 1023.0f;
+            result[3] = (packed >> 30) / 3.0f;
+        } else {
+            const auto* channels = static_cast<const unsigned char*>(pixels);
+            for (size_t i = 0; i < 4; ++i) result[i] = channels[i] / 255.0f;
+        }
+        D3D12_RANGE written{0, 0};
+        m_buffer->Unmap(0, &written);
+        return result;
+    }
+
+private:
+    ComPtr<ID3D12Resource> m_buffer;
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT m_footprint{};
+    DXGI_FORMAT m_format{};
+};
+
 class D3D12TestFixture {
 public:
     D3D12TestFixture(DXGI_FORMAT format = DXGI_FORMAT_R8G8B8A8_UNORM, UINT buffer_count = 2) {
@@ -40,92 +111,51 @@ public:
         DestroyWindow(window);
     }
 
-    void clear_scene() {
-        ComPtr<ID3D12Resource> backbuffer;
-        check_hr(swapchain->GetBuffer(swapchain->GetCurrentBackBufferIndex(), IID_PPV_ARGS(&backbuffer)));
-        D3D12_DESCRIPTOR_HEAP_DESC desc{};
-        desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
-        desc.NumDescriptors = 1;
-        ComPtr<ID3D12DescriptorHeap> heap;
-        check_hr(device->CreateDescriptorHeap(&desc, IID_PPV_ARGS(&heap)));
-        const auto rtv = heap->GetCPUDescriptorHandleForHeapStart();
-        device->CreateRenderTargetView(backbuffer.Get(), nullptr, rtv);
-        D3D12CommandContext commands(device.Get());
-        auto& list = commands.begin();
+    void record_clear_scene(ID3D12GraphicsCommandList* list, ID3D12Resource* backbuffer,
+        const std::array<float, 4>& color) {
+        if (!m_clear_heap) {
+            D3D12_DESCRIPTOR_HEAP_DESC desc{};
+            desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+            desc.NumDescriptors = 1;
+            check_hr(device->CreateDescriptorHeap(&desc, IID_PPV_ARGS(&m_clear_heap)));
+        }
+        const auto rtv = m_clear_heap->GetCPUDescriptorHandleForHeapStart();
+        device->CreateRenderTargetView(backbuffer, nullptr, rtv);
         D3D12_RESOURCE_BARRIER barrier{};
         barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-        barrier.Transition.pResource = backbuffer.Get();
+        barrier.Transition.pResource = backbuffer;
         barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
         barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
         list->ResourceBarrier(1, &barrier);
-        const float black[] = {0, 0, 0, 1};
-        list->ClearRenderTargetView(rtv, black, 0, nullptr);
+        list->ClearRenderTargetView(rtv, color.data(), 0, nullptr);
         barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
         barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
         list->ResourceBarrier(1, &barrier);
+    }
+
+    void clear_scene(const std::array<float, 4>& color = {0, 0, 0, 1}) {
+        ComPtr<ID3D12Resource> backbuffer;
+        check_hr(swapchain->GetBuffer(swapchain->GetCurrentBackBufferIndex(), IID_PPV_ARGS(&backbuffer)));
+        D3D12CommandContext commands(device.Get());
+        record_clear_scene(commands.begin().Get(), backbuffer.Get(), color);
         commands.end(queue.Get());
         commands.wait(10000);
     }
 
-    float read_red() {
-        ComPtr<ID3D12Resource> backbuffer, readback;
+    std::array<float, 4> read_pixel() {
+        ComPtr<ID3D12Resource> backbuffer;
         check_hr(swapchain->GetBuffer(swapchain->GetCurrentBackBufferIndex(), IID_PPV_ARGS(&backbuffer)));
-        auto texture_desc = backbuffer->GetDesc();
-        D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
-        UINT64 size{};
-        device->GetCopyableFootprints(&texture_desc, 0, 1, 0, &footprint, nullptr, nullptr, &size);
-        D3D12_HEAP_PROPERTIES heap{};
-        heap.Type = D3D12_HEAP_TYPE_READBACK;
-        D3D12_RESOURCE_DESC buffer_desc{};
-        buffer_desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-        buffer_desc.Width = size;
-        buffer_desc.Height = buffer_desc.DepthOrArraySize = buffer_desc.MipLevels = buffer_desc.SampleDesc.Count = 1;
-        buffer_desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-        check_hr(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &buffer_desc,
-            D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&readback)));
-        ComPtr<ID3D12CommandAllocator> allocator;
-        ComPtr<ID3D12GraphicsCommandList> commands;
-        check_hr(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocator)));
-        check_hr(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator.Get(), nullptr, IID_PPV_ARGS(&commands)));
-        D3D12_RESOURCE_BARRIER barrier{};
-        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-        barrier.Transition.pResource = backbuffer.Get();
-        barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
-        barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
-        commands->ResourceBarrier(1, &barrier);
-        D3D12_TEXTURE_COPY_LOCATION source{}, destination{};
-        source.pResource = backbuffer.Get();
-        source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-        destination.pResource = readback.Get();
-        destination.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-        destination.PlacedFootprint = footprint;
-        commands->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
-        barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
-        barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
-        commands->ResourceBarrier(1, &barrier);
-        check_hr(commands->Close());
-        ID3D12CommandList* lists[] = {commands.Get()};
-        queue->ExecuteCommandLists(1, lists);
-        ComPtr<ID3D12Fence> fence;
-        check_hr(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence)));
-        HANDLE event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-        if (!event) throw std::runtime_error("Could not create readback fence event");
-        check_hr(queue->Signal(fence.Get(), 1));
-        check_hr(fence->SetEventOnCompletion(1, event));
-        auto wait_result = WaitForSingleObject(event, 10000);
-        CloseHandle(event);
-        if (wait_result != WAIT_OBJECT_0) throw std::runtime_error("Readback fence timed out");
-        void* pixels{};
-        D3D12_RANGE read_range{0, 4};
-        check_hr(readback->Map(0, &read_range, &pixels));
-        auto red = texture_desc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT ?
-            DirectX::PackedVector::XMConvertHalfToFloat(*static_cast<unsigned short*>(pixels)) :
-            *static_cast<unsigned char*>(pixels) / 255.0f;
-        D3D12_RANGE written_range{0, 0};
-        readback->Unmap(0, &written_range);
-        return red;
+        PixelReadback readback(device.Get(), backbuffer.Get());
+        D3D12CommandContext commands(device.Get());
+        readback.record(commands.begin().Get(), backbuffer.Get());
+        commands.end(queue.Get());
+        commands.wait(10000);
+        return readback.pixel();
     }
 
+    float read_red() { return read_pixel()[0]; }
+
+    ComPtr<ID3D12DescriptorHeap> m_clear_heap;
     std::unique_ptr<D3D12Renderer> renderer;
 public:
     HWND window{};
