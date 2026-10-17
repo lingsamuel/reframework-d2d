@@ -28,6 +28,7 @@ void test_device_removal_retirement();
 void test_many_backbuffers();
 void test_retired_renderer_does_not_pin_swapchain();
 void test_cached_overlay_during_graphics_access();
+void test_drawlist_batch_ownership();
 
 namespace {
 struct Pixel { float r, g, b, a; };
@@ -388,6 +389,7 @@ int main(int argc, char** argv) {
         {"Six backbuffers have no fixed-array limit", test_many_backbuffers},
         {"Retired renderer does not pin swapchain", test_retired_renderer_does_not_pin_swapchain},
         {"Cached overlay survives busy graphics access", test_cached_overlay_during_graphics_access},
+        {"Command batch ownership preserves storage and text", test_drawlist_batch_ownership},
         {"GPU pending timeout", test_context_pending_timeout},
         {"D3D11On12 callback exception", test_on12_callback_exception},
         {"D3D11On12 resolution reset", test_on12_resolution_reset},

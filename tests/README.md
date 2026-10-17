@@ -36,3 +36,24 @@ must. They verify the plugin's resource ownership and synchronization; they do n
 claim to reproduce an unspecified game crash. Continuity tests clear the scene and
 rotate swapchain buffers before checking pixels, so old backbuffer contents cannot
 hide a skipped HUD composition.
+
+
+Frame handoff ownership tests run as the separate `frame-mailbox-tests` CTest target.
+They check held-slot stability, latest publication, zero frame copies, producer-side
+resource recycling, and 100,000 concurrent publications. The WARP suite also checks
+that the command vector and long string keep the same addresses across handoff, and
+that a half-built Lua batch never reaches Present.
+
+The mailbox is independent of DirectX and can also be checked under Linux:
+
+```sh
+g++ -std=c++20 -O1 -g -fsanitize=thread -pthread -Isrc tests/FrameMailboxTests.cpp -o /tmp/refd2d-mailbox-tests
+/tmp/refd2d-mailbox-tests
+```
+
+Optional CPU handoff microbenchmark (not a game frame-rate benchmark):
+
+```powershell
+cmake --build build/tests --config Release --target drawlist-handoff-benchmark
+./build/tests/Release/drawlist-handoff-benchmark.exe
+```

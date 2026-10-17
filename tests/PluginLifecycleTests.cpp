@@ -1,5 +1,6 @@
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <future>
 #include <mutex>
 #include <string>
@@ -33,6 +34,14 @@ int block_draw(lua_State*) {
     entered->set_value();
     release_draw.wait();
     return 0;
+}
+
+void close_state(lua_State* state) {
+    // Match ScriptRunner::reset_scripts: destruction callbacks run under the
+    // same host lock acquired by the plugin's lock_lua function-table entry.
+    std::scoped_lock lock{lua_mutex};
+    destroyed(state);
+    lua_close(state);
 }
 
 void run(lua_State* state, const char* script) {
@@ -81,7 +90,11 @@ void test_plugin_lifecycle() {
             font = font or d2d.create_font("Arial", 14)
         end, function()
             draw_count = draw_count + 1
-            if should_block then block_draw() end
+            if should_block then
+                -- This half-built batch must never be observed by Present.
+                d2d.fill_rect(0, 0, 64, 64, 0xff000000)
+                block_draw()
+            end
             assert(not pcall(d2d.text, nil, "bad", 0, 0, 0xffffffff))
             assert(not pcall(d2d.image, nil, 0, 0))
             d2d.fill_rect(0, 0, 64, 64, 0xffffffff)
@@ -170,8 +183,29 @@ void test_plugin_lifecycle() {
         if (f.read_red() < 0.99f) throw std::runtime_error("Plugin did not draw into the replacement swapchain");
     }
     run(state, "local w,h=d2d.surface_size(); assert(w==16 and h==16); assert(init_count==4)");
-    destroyed(state);
-    lua_close(state);
+    close_state(state);
+    present();
+    f.clear_scene();
+    present();
+    if (f.read_red() > 0.01f) throw std::runtime_error("Destroyed Lua state's HUD was still visible");
+    begin_rendering(); // recycle empty producer slots while Lua is idle
+    state = luaL_newstate();
+    luaL_openlibs(state);
+    created(state);
+    run(state, R"(
+        new_init_count = 0
+        d2d.register(function() new_init_count = new_init_count + 1 end,
+                     function() d2d.fill_rect(0, 0, 64, 64, 0xff808080) end)
+    )");
+    f.clear_scene();
+    present();
+    if (f.read_red() > 0.01f) throw std::runtime_error("New Lua state reused an old command batch before init");
+    begin_rendering();
+    present();
+    run(state, "assert(new_init_count == 1)");
+    if (std::abs(f.read_red() - 128.0f / 255.0f) > 0.002f)
+        throw std::runtime_error("New Lua state did not publish its own complete batch");
+    close_state(state);
     reset();
     for (int i = 0; i < 20; ++i) { present(); std::this_thread::sleep_for(1ms); }
 }

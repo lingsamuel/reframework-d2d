@@ -88,7 +88,7 @@ void D2DPainter::set_color(unsigned int color) {
     m_brush->SetColor({r, g, b, a});
 }
 
-void D2DPainter::text(std::shared_ptr<D2DFont>& font, const std::string& text, float x, float y, unsigned int color) {
+void D2DPainter::text(const std::shared_ptr<D2DFont>& font, const std::string& text, float x, float y, unsigned int color) {
     if (!font) throw std::runtime_error{"Invalid D2D font"};
     set_color(color);
     m_context->DrawTextLayout({x, y}, font->layout(text).Get(), m_brush.Get());
@@ -157,7 +157,7 @@ void D2DPainter::line(float x1, float y1, float x2, float y2, float thickness, u
     m_context->DrawLine({x1, y1}, {x2, y2}, m_brush.Get(), thickness);
 }
 
-void D2DPainter::image(std::shared_ptr<D2DImage>& image, float x, float y, float alpha) {
+void D2DPainter::image(const std::shared_ptr<D2DImage>& image, float x, float y, float alpha) {
     if (!image) throw std::runtime_error{"Invalid D2D image"};
     auto [w, h] = image->size();
     if (!image) throw std::runtime_error{"Invalid D2D image"};
@@ -165,7 +165,7 @@ void D2DPainter::image(std::shared_ptr<D2DImage>& image, float x, float y, float
     m_context->DrawBitmap(bitmap.Get(), {x, y, x + w, y + h}, alpha);
 }
 
-void D2DPainter::image(std::shared_ptr<D2DImage>& image, float x, float y, float w, float h, float alpha) {
+void D2DPainter::image(const std::shared_ptr<D2DImage>& image, float x, float y, float w, float h, float alpha) {
     if (!image) throw std::runtime_error{"Invalid D2D image"};
     auto bitmap = image->bitmap(m_context.Get(), m_linear_blending);
     m_context->DrawBitmap(bitmap.Get(), {x, y, x + w, y + h}, alpha);

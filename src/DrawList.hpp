@@ -1,11 +1,11 @@
 #pragma once
 
 #include <memory>
-#include <mutex>
-#include <optional>
+#include <cstdint>
 #include <string>
 #include <vector>
 
+#include "FrameMailbox.hpp"
 #include "D2DFont.hpp"
 #include "D2DImage.hpp"
 
@@ -154,9 +154,13 @@ public:
         std::shared_ptr<D2DImage> image_resource{};
     };
 
-    struct [[nodiscard]] CommandLock {
+    struct Batch {
+        uint64_t generation{};
+        std::vector<Command> commands;
+    };
+
+    struct [[nodiscard]] Writer {
         std::vector<Command>& commands;
-        std::unique_lock<std::mutex> lock;
 
         void text(std::shared_ptr<D2DFont>& font, std::string text, float x, float y, unsigned int color);
         void fill_rect(float x, float y, float w, float h, unsigned int color);
@@ -176,15 +180,30 @@ public:
             unsigned int color, bool clockwise);
     };
 
-    auto acquire() { return CommandLock{m_commands, std::unique_lock{m_commands_mux}}; }
-
-    std::optional<CommandLock> try_acquire() {
-        std::unique_lock lock{m_commands_mux, std::try_to_lock};
-        if (!lock.owns_lock()) return std::nullopt;
-        return CommandLock{m_commands, std::move(lock)};
+    // Producer only: begin a new batch in the exclusively owned write slot.
+    Writer begin() {
+        auto& batch = m_mailbox.back();
+        batch.generation = 0;
+        batch.commands.clear();
+        return Writer{batch.commands};
     }
 
+    // The writer and any references into it must no longer be used after publish.
+    void publish(uint64_t generation) noexcept {
+        m_mailbox.back().generation = generation;
+        m_mailbox.publish();
+    }
+
+    void clear() {
+        (void)begin();
+        publish(0);
+        // Release the other writable slot's references even if Lua is going idle.
+        (void)begin();
+    }
+
+    // Consumer only: fixed, immutable until the next acquire, including on repaint failure.
+    auto acquire() noexcept { return m_mailbox.acquire(); }
+
 private:
-    std::vector<Command> m_commands{};
-    std::mutex m_commands_mux{};
+    FrameMailbox<Batch> m_mailbox;
 };

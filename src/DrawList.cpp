@@ -1,6 +1,6 @@
 #include "DrawList.hpp"
 
-void DrawList::CommandLock::text(std::shared_ptr<D2DFont>& font, std::string text, float x, float y, unsigned int color) {
+void DrawList::Writer::text(std::shared_ptr<D2DFont>& font, std::string text, float x, float y, unsigned int color) {
     Command cmd{};
     cmd.type = CommandType::TEXT;
     cmd.text.x = x;
@@ -11,7 +11,7 @@ void DrawList::CommandLock::text(std::shared_ptr<D2DFont>& font, std::string tex
     commands.emplace_back(std::move(cmd));
 }
 
-void DrawList::CommandLock::fill_rect(float x, float y, float w, float h, unsigned int color) {
+void DrawList::Writer::fill_rect(float x, float y, float w, float h, unsigned int color) {
     Command cmd{};
     cmd.type = CommandType::FILL_RECT;
     cmd.fill_rect.x = x;
@@ -22,7 +22,7 @@ void DrawList::CommandLock::fill_rect(float x, float y, float w, float h, unsign
     commands.emplace_back(std::move(cmd));
 }
 
-void DrawList::CommandLock::outline_rect(float x, float y, float w, float h, float thickness, unsigned int color) {
+void DrawList::Writer::outline_rect(float x, float y, float w, float h, float thickness, unsigned int color) {
     Command cmd{};
     cmd.type = CommandType::OUTLINE_RECT;
     cmd.outline_rect.x = x;
@@ -34,7 +34,7 @@ void DrawList::CommandLock::outline_rect(float x, float y, float w, float h, flo
     commands.emplace_back(std::move(cmd));
 }
 
-void DrawList::CommandLock::rounded_rect(float x, float y, float w, float h, float rX, float rY, float thickness, unsigned int color) {
+void DrawList::Writer::rounded_rect(float x, float y, float w, float h, float rX, float rY, float thickness, unsigned int color) {
     Command cmd{};
     cmd.type = CommandType::ROUNDED_RECT;
     cmd.rounded_rect.x = x;
@@ -48,7 +48,7 @@ void DrawList::CommandLock::rounded_rect(float x, float y, float w, float h, flo
     commands.emplace_back(std::move(cmd));
 }
 
-void DrawList::CommandLock::fill_rounded_rect(float x, float y, float w, float h, float rX, float rY, unsigned int color) {
+void DrawList::Writer::fill_rounded_rect(float x, float y, float w, float h, float rX, float rY, unsigned int color) {
     Command cmd{};
     cmd.type = CommandType::FILL_ROUNDED_RECT;
     cmd.rounded_rect.x = x;
@@ -61,7 +61,7 @@ void DrawList::CommandLock::fill_rounded_rect(float x, float y, float w, float h
     commands.emplace_back(std::move(cmd));
 }
 
-void DrawList::CommandLock::quad(
+void DrawList::Writer::quad(
     float x1, float y1, float x2, float y2, float x3, float y3, float x4, float y4, float thickness, unsigned int color) {
     Command cmd{};
     cmd.type = CommandType::QUAD;
@@ -78,7 +78,7 @@ void DrawList::CommandLock::quad(
     commands.emplace_back(std::move(cmd));
 }
 
-void DrawList::CommandLock::fill_quad(
+void DrawList::Writer::fill_quad(
     float x1, float y1, float x2, float y2, float x3, float y3, float x4, float y4, unsigned int color) {
     Command cmd{};
     cmd.type = CommandType::FILL_QUAD;
@@ -94,7 +94,7 @@ void DrawList::CommandLock::fill_quad(
     commands.emplace_back(std::move(cmd));
 }
 
-void DrawList::CommandLock::line(float x1, float y1, float x2, float y2, float thickness, unsigned int color) {
+void DrawList::Writer::line(float x1, float y1, float x2, float y2, float thickness, unsigned int color) {
     Command cmd{};
     cmd.type = CommandType::LINE;
     cmd.line.x1 = x1;
@@ -106,7 +106,7 @@ void DrawList::CommandLock::line(float x1, float y1, float x2, float y2, float t
     commands.emplace_back(std::move(cmd));
 }
 
-void DrawList::CommandLock::image(std::shared_ptr<D2DImage>& image, float x, float y, float w, float h, float alpha) {
+void DrawList::Writer::image(std::shared_ptr<D2DImage>& image, float x, float y, float w, float h, float alpha) {
     Command cmd{};
     cmd.type = CommandType::IMAGE;
     cmd.image.x = x;
@@ -118,7 +118,7 @@ void DrawList::CommandLock::image(std::shared_ptr<D2DImage>& image, float x, flo
     commands.emplace_back(std::move(cmd));
 }
 
-void DrawList::CommandLock::fill_circle(float x, float y, float radiusX, float radiusY, unsigned int color) {
+void DrawList::Writer::fill_circle(float x, float y, float radiusX, float radiusY, unsigned int color) {
     Command cmd{};
     cmd.type = CommandType::FILL_CIRCLE;
     cmd.fill_circle.x = x;
@@ -129,7 +129,7 @@ void DrawList::CommandLock::fill_circle(float x, float y, float radiusX, float r
     commands.emplace_back(std::move(cmd));
 }
 
-void DrawList::CommandLock::circle(float x, float y, float radiusX, float radiusY, float thickness, unsigned int color) {
+void DrawList::Writer::circle(float x, float y, float radiusX, float radiusY, float thickness, unsigned int color) {
     Command cmd{};
     cmd.type = CommandType::CIRCLE;
     cmd.circle.x = x;
@@ -141,7 +141,7 @@ void DrawList::CommandLock::circle(float x, float y, float radiusX, float radius
     commands.emplace_back(std::move(cmd));
 }
 
-void DrawList::CommandLock::pie(float x, float y, float r, float startAngle, float sweepAngle, unsigned int color, bool clockwise) {
+void DrawList::Writer::pie(float x, float y, float r, float startAngle, float sweepAngle, unsigned int color, bool clockwise) {
     Command cmd{};
     cmd.type = CommandType::PIE;
     cmd.pie.x = x;
@@ -154,7 +154,7 @@ void DrawList::CommandLock::pie(float x, float y, float r, float startAngle, flo
     commands.emplace_back(std::move(cmd));
 }
 
-void DrawList::CommandLock::outline_pie(float x, float y, float r, float startAngle, float sweepAngle, float thickness, unsigned int color, bool clockwise) {
+void DrawList::Writer::outline_pie(float x, float y, float r, float startAngle, float sweepAngle, float thickness, unsigned int color, bool clockwise) {
     Command cmd{};
     cmd.type = CommandType::OUTLINE_PIE;
     cmd.outline_pie.x = x;
@@ -168,7 +168,7 @@ void DrawList::CommandLock::outline_pie(float x, float y, float r, float startAn
     commands.emplace_back(std::move(cmd));
 }
 
-void DrawList::CommandLock::ring(float x, float y, float outerRadius, float innerRadius, float startAngle, float sweepAngle, unsigned int color, bool clockwise) {
+void DrawList::Writer::ring(float x, float y, float outerRadius, float innerRadius, float startAngle, float sweepAngle, unsigned int color, bool clockwise) {
     Command cmd{};
     cmd.type = CommandType::RING;
     cmd.ring.x = x;
@@ -182,7 +182,7 @@ void DrawList::CommandLock::ring(float x, float y, float outerRadius, float inne
     commands.emplace_back(std::move(cmd));
 }
 
-void DrawList::CommandLock::outline_ring(float x, float y, float outerRadius, float innerRadius, float startAngle, float sweepAngle,
+void DrawList::Writer::outline_ring(float x, float y, float outerRadius, float innerRadius, float startAngle, float sweepAngle,
     float thickness, unsigned int color, bool clockwise) {
     Command cmd{};
     cmd.type = CommandType::OUTLINE_RING;

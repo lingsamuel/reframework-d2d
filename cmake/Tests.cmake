@@ -5,6 +5,7 @@ if(REFD2D_BUILD_TESTS)
     add_executable(hdr-render-tests
         "${_refd2d_test_source_dir}/tests/HdrRenderTests.cpp"
         "${_refd2d_test_source_dir}/tests/HdrOn12Tests.cpp"
+        "${_refd2d_test_source_dir}/tests/DrawListTests.cpp"
         "${_refd2d_test_source_dir}/tests/PluginLifecycleTests.cpp"
         "${_refd2d_test_source_dir}/src/Plugin.cpp"
         "${_refd2d_test_source_dir}/src/DrawList.cpp"
@@ -23,5 +24,14 @@ if(REFD2D_BUILD_TESTS)
     target_link_libraries(hdr-render-tests PRIVATE utf8cpp sol2::sol2 lua d2d1 dwrite d3d11 d3d12 dxgi d3dcompiler dxguid windowscodecs ole32)
     add_test(NAME hdr-render-tests COMMAND hdr-render-tests)
     set_tests_properties(hdr-render-tests PROPERTIES TIMEOUT 60)
+    add_executable(frame-mailbox-tests "${_refd2d_test_source_dir}/tests/FrameMailboxTests.cpp")
+    target_include_directories(frame-mailbox-tests PRIVATE "${_refd2d_test_source_dir}/src")
+    target_compile_features(frame-mailbox-tests PRIVATE cxx_std_20)
+    add_test(NAME frame-mailbox-tests COMMAND frame-mailbox-tests)
+    set_tests_properties(frame-mailbox-tests PROPERTIES TIMEOUT 30)
+
+    add_executable(drawlist-handoff-benchmark EXCLUDE_FROM_ALL "${_refd2d_test_source_dir}/tests/DrawListBenchmark.cpp")
+    target_include_directories(drawlist-handoff-benchmark PRIVATE "${_refd2d_test_source_dir}/src")
+    target_compile_features(drawlist-handoff-benchmark PRIVATE cxx_std_20)
     unset(_refd2d_test_source_dir)
 endif()

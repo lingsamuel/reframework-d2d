@@ -16,29 +16,25 @@ using Clock = std::chrono::high_resolution_clock;
 struct Plugin {
     RendererLifecycle renderers;
     std::atomic<bool> has_draw_functions{false};
-    std::atomic<uint64_t> published_generation{0};
     std::mutex error_mutex;
     std::vector<sol::protected_function> draw_fns{};
     std::vector<sol::protected_function> init_fns{};
     lua_State* lua{};
     bool needs_init{};
+    uint64_t initialized_generation{}; // Lua thread only
     DrawList drawlist{};
-    // Present owns this complete replay batch; Lua edits only drawlist's next batch.
-    std::vector<DrawList::Command> render_commands;
-    uint64_t render_generation{};
     bool repaint_pending{};
     Clock::time_point d2d_next_frame_time{Clock::now()};
     const std::chrono::duration<double> DEFAULT_UPDATE_INTERVAL{1.0 / 60.0};
     std::chrono::duration<double> d2d_update_interval{DEFAULT_UPDATE_INTERVAL};
-    std::atomic<bool> update_d2d{false};
     std::string last_script_error{};
 };
 
 Plugin* g_plugin{};
 
-thread_local DrawList::CommandLock* g_current_commands{};
+thread_local DrawList::Writer* g_current_commands{};
 
-DrawList::CommandLock& require_commands() {
+DrawList::Writer& require_commands() {
     if (!g_current_commands) throw std::runtime_error{"d2d drawing is only valid inside a registered draw callback"};
     return *g_current_commands;
 }
@@ -326,10 +322,11 @@ void on_ref_lua_state_created(lua_State* l) try {
 }
 
 void on_ref_lua_state_destroyed(lua_State* l) try {
-    g_plugin->drawlist.acquire().commands.clear();
+    // ScriptRunner invokes this under the same host access mutex acquired by
+    // lock_lua(). Do not nest API::LuaLock here: its private mutex comes first.
+    g_plugin->drawlist.clear();
     g_plugin->draw_fns.clear();
     g_plugin->has_draw_functions.store(false, std::memory_order_release);
-    g_plugin->published_generation.store(0, std::memory_order_release);
     g_plugin->init_fns.clear();
     {
         std::scoped_lock lock{g_plugin->error_mutex};
@@ -344,24 +341,18 @@ void on_ref_lua_state_destroyed(lua_State* l) try {
 void on_ref_device_reset() try {
     // No Lua or command-list lock here: a script may be paused while holding them.
     g_plugin->renderers.reset();
-    g_plugin->published_generation.store(0, std::memory_order_release);
-    g_plugin->update_d2d.store(false, std::memory_order_release);
 } catch (const std::exception& e) {
     handle_error_message(e.what());
     API::get()->log_error("[reframework-d2d] [on_ref_device_reset] %s", e.what());
 }
 
 void on_ref_frame() {
-    bool refreshRequested = false;
     RendererLifecycle::Snapshot frame;
     try {
         g_plugin->renderers.collect();
-        if (!g_plugin->has_draw_functions.load(std::memory_order_acquire)) {
-            g_plugin->render_commands.clear();
-            g_plugin->render_generation = 0;
-            g_plugin->repaint_pending = false;
-            return;
-        }
+        auto commands = g_plugin->drawlist.acquire();
+        if (commands.changed) g_plugin->repaint_pending = true;
+        if (!g_plugin->has_draw_functions.load(std::memory_order_acquire)) return;
         auto rd = API::get()->param()->renderer_data;
         if (!rd || !rd->swapchain || !rd->device || !rd->command_queue) return;
         frame = g_plugin->renderers.snapshot();
@@ -375,25 +366,13 @@ void on_ref_frame() {
                 (ID3D12Device*)rd->device, (ID3D12CommandQueue*)rd->command_queue));
             frame = g_plugin->renderers.snapshot();
         }
-        if (g_plugin->published_generation.load(std::memory_order_acquire) != frame.generation) return;
-        {
-            auto cmds_lock = g_plugin->drawlist.try_acquire();
-            if (cmds_lock) {
-                refreshRequested = g_plugin->update_d2d.exchange(false, std::memory_order_acq_rel);
-                if (refreshRequested || g_plugin->render_generation != frame.generation) {
-                    g_plugin->render_commands = cmds_lock->commands;
-                    g_plugin->render_generation = frame.generation;
-                    g_plugin->repaint_pending = true;
-                }
-            }
-        }
-        // A busy producer delays the repaint, not composition of the last complete HUD.
-        // Release the command lock before any graphics operation or GPU wait.
-        if (g_plugin->render_generation != frame.generation) return;
+        // A slot is visible only after its complete batch and renderer generation
+        // have been published together. No notification or second copy is needed.
+        if (commands.frame.generation != frame.generation) return;
 
         const bool repainted = frame.renderer->render((IDXGISwapChain*)rd->swapchain,
             [&](D2DPainter& d2d) {
-                for (auto&& cmd : g_plugin->render_commands) {
+                for (const auto& cmd : commands.frame.commands) {
                     switch (cmd.type) {
                     case DrawList::CommandType::TEXT:
                         d2d.text(cmd.font_resource, cmd.str, cmd.text.x, cmd.text.y, cmd.text.color);
@@ -471,11 +450,9 @@ void on_ref_frame() {
 
     } catch (const GpuWaitTimeout&) {
         // GPU lag is transient. Rebuilding here would accumulate retired full-screen resources.
-        if (refreshRequested) g_plugin->update_d2d.store(true, std::memory_order_release);
     } catch (const std::exception& e) {
         g_plugin->renderers.reset(frame.renderer);
         // A fresh generation will rerun init and regenerate commands.
-        if (refreshRequested) g_plugin->update_d2d.store(true, std::memory_order_release);
         handle_error_message(e.what());
         // g_plugin->ref->functions->log_plugin->error(e.what());
     }
@@ -483,9 +460,13 @@ void on_ref_frame() {
 
 void on_begin_rendering() try {
     auto lua_lock = API::LuaLock{};
+    if (g_plugin->draw_fns.empty()) {
+        g_plugin->drawlist.clear();
+        return;
+    }
     auto frame = g_plugin->renderers.snapshot();
     if (!frame.renderer) return;
-    if (g_plugin->needs_init || g_plugin->published_generation.load(std::memory_order_acquire) != frame.generation) {
+    if (g_plugin->needs_init || g_plugin->initialized_generation != frame.generation) {
         // Do not hold a graphics/lifecycle lock while executing arbitrary Lua code.
         for (const auto& init_fn : g_plugin->init_fns) {
             try {
@@ -498,19 +479,18 @@ void on_begin_rendering() try {
         }
         if (g_plugin->renderers.snapshot().generation != frame.generation) return;
         g_plugin->needs_init = false;
+        g_plugin->initialized_generation = frame.generation;
         g_plugin->d2d_next_frame_time = Clock::now();
     }
 
     auto now = Clock::now();
 
     if (now >= g_plugin->d2d_next_frame_time) {
-        auto cmds_lock = g_plugin->drawlist.acquire();
+        auto writer = g_plugin->drawlist.begin();
         struct CommandScope {
             ~CommandScope() { g_current_commands = nullptr; }
         } scope;
-        g_current_commands = &cmds_lock;
-
-        cmds_lock.commands.clear();
+        g_current_commands = &writer;
 
         for (const auto& draw_fn : g_plugin->draw_fns) {
             try {
@@ -526,9 +506,8 @@ void on_begin_rendering() try {
 
         g_current_commands = nullptr;
         if (g_plugin->renderers.snapshot().generation != frame.generation) return;
-        g_plugin->published_generation.store(frame.generation, std::memory_order_release);
+        g_plugin->drawlist.publish(frame.generation);
         g_plugin->d2d_next_frame_time = now + std::chrono::duration_cast<std::chrono::milliseconds>(g_plugin->d2d_update_interval);
-        g_plugin->update_d2d.store(true, std::memory_order_release);
     }
 } catch (const std::exception& e) {
     handle_error_message(e.what());
