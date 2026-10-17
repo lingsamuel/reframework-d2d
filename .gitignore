@@ -9,3 +9,5 @@ cmake-build-*/
 .worktrees
 docs/
 AGENTS.md
+.tmp
+.reference
