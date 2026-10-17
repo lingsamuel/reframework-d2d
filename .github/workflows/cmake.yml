@@ -10,13 +10,25 @@ jobs:
     if: ${{github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)}}
 
     runs-on: windows-latest
+    outputs:
+      version: ${{steps.version.outputs.version}}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4.1.1
 
+      - name: Determine version
+        id: version
+        shell: pwsh
+        run: |
+          $version = '0.0.0'
+          if ($env:GITHUB_REF -like 'refs/tags/v*') {
+            $version = $env:GITHUB_REF_NAME.Substring(1)
+          }
+          "version=$version" >> $env:GITHUB_OUTPUT
+
       - name: Configure CMake
-        run: cmake -S ${{github.workspace}} -B ${{github.workspace}}/build -G "Visual Studio 18 2026" -A x64 -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}} -DCMAKE_INSTALL_PREFIX=${{github.workspace}}/install
+        run: cmake -S ${{github.workspace}} -B ${{github.workspace}}/build -G "Visual Studio 18 2026" -A x64 -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}} -DCMAKE_INSTALL_PREFIX=${{github.workspace}}/install -DREFD2D_VERSION=${{steps.version.outputs.version}}
 
       - name: Build
         run: cmake --build ${{github.workspace}}/build --config ${{env.BUILD_TYPE}}
@@ -34,7 +46,7 @@ jobs:
       - name: Upload artifacts (DLL and Lua)
         uses: actions/upload-artifact@v4.3.1
         with:
-          name: REFramework-D2D
+          name: REFramework-D2D-${{steps.version.outputs.version}}
           path: |
             ${{github.workspace}}\artifacts\*
           if-no-files-found: error
@@ -51,7 +63,7 @@ jobs:
       - name: Download built artifacts
         uses: actions/download-artifact@v4
         with:
-          name: REFramework-D2D
+          name: REFramework-D2D-${{needs.build.outputs.version}}
           path: ${{github.workspace}}/release-temp
 
       - name: Organize release files
@@ -65,12 +77,12 @@ jobs:
       - name: Package release files
         run: |
           cd ${{github.workspace}}/release
-          zip -r REFramework-D2D.zip reframework
+          zip -r "REFramework-D2D-${GITHUB_REF_NAME}.zip" reframework
         shell: bash
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: ${{github.workspace}}/release/REFramework-D2D.zip
+          files: ${{github.workspace}}/release/REFramework-D2D-${{github.ref_name}}.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,5 +1,7 @@
 cmake_minimum_required(VERSION 3.25)
-project(reframework-d2d)
+set(REFD2D_VERSION "0.0.0" CACHE STRING "DLL version (major.minor.patch)")
+project(reframework-d2d VERSION "${REFD2D_VERSION}" LANGUAGES C CXX RC)
+configure_file(cmake/version.rc.in "${CMAKE_CURRENT_BINARY_DIR}/version.rc" @ONLY)
 include (cmake/CPM.cmake)
 
 CPMAddPackage("gh:nemtrif/utfcpp@4.0.5")
@@ -24,6 +26,7 @@ endif()
 
 
 add_library(reframework-d2d SHARED
+    "${CMAKE_CURRENT_BINARY_DIR}/version.rc"
     src/D2DFont.cpp
     src/D2DImage.cpp
     src/D2DPainter.cpp
